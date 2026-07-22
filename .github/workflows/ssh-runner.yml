@@ -1,0 +1,85 @@
+name: 🖥️ SSH Runner (6 hour idle)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
+
+jobs:
+  ssh-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start SSH over lolgames
+        id: lolgames_ssh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+          mkdir -p ~/.ssh /tmp/lolgames-ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ inputs.ssh_public_key }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes
+
+          RUN_SUFFIX="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          PUBLIC_NAME="runner-${RUN_SUFFIX}-ssh"
+          PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+
+          nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
+            --server 161.153.109.33 \
+            --name "$PUBLIC_NAME" \
+            --public-port "$PUBLIC_PORT" \
+            > /tmp/lolgames-ssh/tunnel.log 2>&1 &
+
+          for _ in {1..30}; do
+            if grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log; then
+              break
+            fi
+            sleep 1
+          done
+
+          HOST="${PUBLIC_NAME}.lolgames.net"
+          SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
+          WEB_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          {
+            echo "$SSH_CMD"
+            echo "$WEB_URL"
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+          } > /tmp/ssh-link.txt
+          echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
+          echo "============================================"
+          echo "  LOLGAMES SSH CONNECTION"
+          echo "============================================"
+          echo "SSH: $SSH_CMD"
+          echo "Host: $HOST"
+          echo "Port: $PUBLIC_PORT"
+          echo "============================================"
+
+      - name: Upload SSH link as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-link
+          path: |
+            /tmp/ssh-link.txt
+          if-no-files-found: error
+
+      - name: Keep alive 6 hours
+        run: |
+          echo "Runner alive for 6 hours..."
+          sleep 21600
