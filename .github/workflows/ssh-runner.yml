@@ -8,6 +8,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: ssh-runner-${{ github.repository }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   ssh-session:
     runs-on: ubuntu-latest
@@ -23,7 +27,7 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
-          sudo apt-get install -y openssh-server
+          sudo apt-get install -y openssh-server tmux
 
           mkdir -p ~/.ssh /tmp/lolgames-ssh
           chmod 700 ~/.ssh
@@ -33,8 +37,15 @@ jobs:
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes
 
-          RUN_SUFFIX="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          PUBLIC_NAME="runner-${RUN_SUFFIX}-ssh"
+          for _ in {1..20}; do
+            if ss -ltn | grep -q ':2222 '; then
+              break
+            fi
+            sleep 1
+          done
+          ss -ltn | grep -q ':2222 '
+
+          PUBLIC_NAME="runner-${GITHUB_RUN_ID}-1-ssh"
           PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
 
           nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
@@ -42,6 +53,7 @@ jobs:
             --name "$PUBLIC_NAME" \
             --public-port "$PUBLIC_PORT" \
             > /tmp/lolgames-ssh/tunnel.log 2>&1 &
+          TUNNEL_PID=$!
 
           for _ in {1..30}; do
             if grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log; then
@@ -49,6 +61,7 @@ jobs:
             fi
             sleep 1
           done
+          grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log
 
           HOST="${PUBLIC_NAME}.lolgames.net"
           SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
@@ -60,6 +73,19 @@ jobs:
             echo "host=$HOST"
             echo "port=$PUBLIC_PORT"
           } > /tmp/ssh-link.txt
+
+          {
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
+            echo "sshd_ready=yes"
+            echo "runner_name=$(hostname)"
+            echo "tunnel_pid=$TUNNEL_PID"
+            echo "tunnel_log_tail<<EOF"
+            tail -n 20 /tmp/lolgames-ssh/tunnel.log || true
+            echo "EOF"
+          } > /tmp/ssh-status.txt
+
           echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
@@ -75,8 +101,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ssh-link
-          path: |
-            /tmp/ssh-link.txt
+          path: /tmp/ssh-link.txt
+          if-no-files-found: error
+
+      - name: Upload SSH status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-status
+          path: /tmp/ssh-status.txt
           if-no-files-found: error
 
       - name: Keep alive 6 hours
