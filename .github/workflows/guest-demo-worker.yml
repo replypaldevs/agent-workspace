@@ -1,0 +1,276 @@
+name: Guest Demo Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
+      lolgames_ssh_name:
+        description: Stable lolgames SSH hostname prefix
+        required: false
+        type: string
+      lolgames_ssh_port:
+        description: Stable lolgames SSH public port
+        required: false
+        type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents lolgames prefix
+        required: false
+        type: string
+      demo_lifetime_seconds:
+        description: Demo worker lifetime in seconds. Default 18000 (5h).
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: guest-demo-worker-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  guest-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start SSH over lolgames
+        id: lolgames_ssh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-server tmux
+
+          mkdir -p ~/.ssh /tmp/lolgames-ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ inputs.ssh_public_key }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes
+
+          for _ in {1..20}; do
+            if ss -ltn | grep -q ':2222 '; then
+              break
+            fi
+            sleep 1
+          done
+          ss -ltn | grep -q ':2222 '
+
+          PUBLIC_NAME="${{ inputs.lolgames_ssh_name }}"
+          if [[ -z "$PUBLIC_NAME" ]]; then
+            PUBLIC_NAME="guest-demo-${GITHUB_RUN_ID}-ssh"
+          fi
+
+          PUBLIC_PORT="${{ inputs.lolgames_ssh_port }}"
+          if [[ -z "$PUBLIC_PORT" ]]; then
+            PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+          fi
+
+          TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
+          if [[ -z "$TUNNEL_PREFIX" ]]; then
+            TUNNEL_PREFIX="${PUBLIC_NAME%-ssh}"
+          fi
+
+          nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
+            --server 161.153.109.33 \
+            --name "$PUBLIC_NAME" \
+            --public-port "$PUBLIC_PORT" \
+            > /tmp/lolgames-ssh/tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+
+          for _ in {1..30}; do
+            if grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log
+
+          HOST="${PUBLIC_NAME}.lolgames.net"
+          SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
+          WEB_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          {
+            echo "$SSH_CMD"
+            echo "$WEB_URL"
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+          } > /tmp/ssh-link.txt
+
+          {
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+            echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
+            echo "sshd_ready=yes"
+            echo "runner_name=$(hostname)"
+            echo "tunnel_pid=$TUNNEL_PID"
+            echo "tunnel_log_tail<<EOF"
+            tail -n 20 /tmp/lolgames-ssh/tunnel.log || true
+            echo "EOF"
+          } > /tmp/ssh-status.txt
+
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
+          echo "public_name=$PUBLIC_NAME" >> "$GITHUB_OUTPUT"
+          echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SSH link as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-link
+          path: /tmp/ssh-link.txt
+          if-no-files-found: error
+
+      - name: Upload SSH status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-status
+          path: /tmp/ssh-status.txt
+          if-no-files-found: error
+
+      - name: Start Worker Agents demo
+        id: worker_agents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PORT=1456
+          TUNNEL_PREFIX="${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
+          WORKER_PUBLIC_NAME="${TUNNEL_PREFIX}-worker-agents"
+          WORKER_URL="http://${WORKER_PUBLIC_NAME}.lolgames.net:${APP_PORT}"
+          LIFETIME="${{ inputs.demo_lifetime_seconds }}"
+          if [[ -z "$LIFETIME" ]]; then
+            LIFETIME=18000
+          fi
+          RENEW_AFTER=$(( LIFETIME * 70 / 100 ))
+          STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          EXPIRES_AT="$(date -u -d "@$(( $(date +%s) + LIFETIME ))" +%Y-%m-%dT%H:%M:%SZ)"
+          RENEW_AT="$(date -u -d "@$(( $(date +%s) + RENEW_AFTER ))" +%Y-%m-%dT%H:%M:%SZ)"
+
+          cd workerAgents
+          npm install
+          TMUX='' tmux -L workeragents -f /dev/null kill-server 2>/dev/null || true
+          TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents \
+            "cd '$PWD' && PORT=$APP_PORT AGENT_CONSOLE_HOST=127.0.0.1 npm start > ~/worker-agents.log 2>&1"
+
+          for _ in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/tmp/worker-agents-status.json
+
+          nohup python3 ../scripts/lolgames_tunnel.py client "127.0.0.1:${APP_PORT}" \
+            --server 161.153.109.33 \
+            --name "$WORKER_PUBLIC_NAME" \
+            --same-port \
+            > ~/worker-agents-lolgames.log 2>&1 &
+          WORKER_TUNNEL_PID=$!
+
+          mkdir -p ~/.worker-agents
+          python3 - <<PY
+          import json, os
+          payload = {
+              'status': 'running',
+              'url': '$WORKER_URL',
+              'worker_agents_url': '$WORKER_URL',
+              'port': $APP_PORT,
+              'lolgames_tunnel_prefix': '$TUNNEL_PREFIX',
+              'ssh_host': '${{ steps.lolgames_ssh.outputs.host }}',
+              'ssh_port': '${{ steps.lolgames_ssh.outputs.port }}',
+              'started_at': '$STARTED_AT',
+              'expires_at': '$EXPIRES_AT',
+              'renew_at': '$RENEW_AT',
+              'demo_lifetime_seconds': $LIFETIME,
+              'renew_after_seconds': $RENEW_AFTER,
+          }
+          os.makedirs(os.path.expanduser('~/.worker-agents'), exist_ok=True)
+          with open(os.path.expanduser('~/.worker-agents/state.json'), 'w', encoding='utf-8') as f:
+              json.dump(payload, f, indent=2)
+              f.write('\n')
+          with open('/tmp/guest-demo-metadata.json', 'w', encoding='utf-8') as f:
+              json.dump(payload, f, indent=2)
+              f.write('\n')
+          PY
+
+          echo "worker_agents_url=$WORKER_URL" >> "$GITHUB_OUTPUT"
+          echo "demo_lifetime_seconds=$LIFETIME" >> "$GITHUB_OUTPUT"
+          echo "renew_after_seconds=$RENEW_AFTER" >> "$GITHUB_OUTPUT"
+          echo "worker_tunnel_pid=$WORKER_TUNNEL_PID" >> "$GITHUB_OUTPUT"
+          echo "Guest demo Worker Agents: $WORKER_URL"
+
+      - name: Upload guest demo metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-demo-metadata
+          path: /tmp/guest-demo-metadata.json
+          if-no-files-found: error
+
+      - name: Wait until renewal point
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep "${{ steps.worker_agents.outputs.renew_after_seconds }}"
+
+      - name: Dispatch successor run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$(python3 - <<'PY'
+          import json
+          payload = {
+              "ref": "${{ github.ref_name }}",
+              "inputs": {
+                  "ssh_public_key": """${{ inputs.ssh_public_key }}""".strip(),
+                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.public_name }}""".strip(),
+                  "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
+                  "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
+                  "demo_lifetime_seconds": """${{ steps.worker_agents.outputs.demo_lifetime_seconds }}""".strip(),
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/guest-demo-worker.yml/dispatches" \
+            -d "$payload"
+          date -u +%Y-%m-%dT%H:%M:%SZ >/tmp/guest-demo-renewal.txt
+
+      - name: Upload renewal status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-demo-renewal
+          path: /tmp/guest-demo-renewal.txt
+          if-no-files-found: error
+
+      - name: Keep alive until reset
+        shell: bash
+        run: |
+          set -euo pipefail
+          lifetime="${{ steps.worker_agents.outputs.demo_lifetime_seconds }}"
+          renew_after="${{ steps.worker_agents.outputs.renew_after_seconds }}"
+          remaining=$(( lifetime - renew_after ))
+          echo "Successor dispatched; keeping current demo alive for ${remaining}s handoff/reset window."
+          sleep "$remaining"
