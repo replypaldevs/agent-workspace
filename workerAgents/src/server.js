@@ -5,6 +5,7 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import { execSync } from 'node:child_process';
 import { config, defaultPath } from './config.js';
+import * as nineRouter from './9router.js';
 import { createLoginUrl, exchangeCodeForTokens, getAuthStatus, logout } from './auth.js';
 import { supervisor } from './agents.js';
 import { ensureSshd, runSetup, getSetupStatus, onSetupEvent, syncSkills } from './setup.js';
@@ -19,42 +20,10 @@ const contentTypes = new Map([
 const ANSI = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 const HERMES_CONFIG_PATH = path.join(process.env.HOME || '/tmp', '.hermes', 'config.yaml');
 const ROUTER_LOG_PATH = '/tmp/9router.log';
-const ROUTER_PORTS = [20127, 20128, 20129, 20130, 20131, 20132];
-const ROUTER_CANDIDATE_DIRS = [
-  process.env.WORKER_AGENTS_9ROUTER_DIR,
-  path.join(process.env.HOME || '/tmp', '9router'),
-  path.join(process.env.HOME || '/tmp', '.worker-agents', '9router'),
-  '/Users/igor/Git-projects/9router',
-  '/opt/9router',
-].filter(Boolean);
 const consoleLogs = [];
 const MAX_CONSOLE_LOGS = 500;
 
-function resolve9RouterDir() {
-  return ROUTER_CANDIDATE_DIRS.find((dir) => fs.existsSync(path.join(dir, 'package.json'))) || ROUTER_CANDIDATE_DIRS[0] || '/opt/9router';
-}
 
-function build9RouterLaunchCommand(port = 20127) {
-  const routerDir = resolve9RouterDir();
-  return [
-    `export PATH="${defaultPath}"`,
-    'export NODE_ENV=production',
-    `export PORT=${port}`,
-    'export HOSTNAME=127.0.0.1',
-    `export NEXT_PUBLIC_BASE_URL=http://127.0.0.1:${port}`,
-    `export BASE_URL=http://127.0.0.1:${port}`,
-    `export DATA_DIR="${path.join(process.env.HOME || '/tmp', '.9router', 'data')}"`,
-    'mkdir -p "$DATA_DIR"',
-    `cd "${routerDir}"`,
-    'if [ ! -f .next/standalone/server.js ]; then npm run build; fi',
-    'mkdir -p .next/standalone/.next',
-    'rm -rf .next/standalone/.next/static .next/standalone/public',
-    'if [ -d .next/static ]; then cp -R .next/static .next/standalone/.next/static; fi',
-    'if [ -d public ]; then cp -R public .next/standalone/public; fi',
-    'cd .next/standalone',
-    'exec node server.js'
-  ].join('; ');
-}
 
 function captureConsoleLog(level, args) {
   const raw = [].map.call(args, String).join(' ');
@@ -103,36 +72,7 @@ function execText(command) {
   }
 }
 
-function parseHermes9RouterPort() {
-  const text = readFileSafe(HERMES_CONFIG_PATH);
-  const match = text.match(/api:\s*http:\/\/127\.0\.0\.1:(\d+)\/v1/);
-  return match ? Number.parseInt(match[1], 10) : 20127;
-}
 
-function writeHermes9RouterPort(port) {
-  const target = Number.parseInt(String(port), 10);
-  if (!Number.isFinite(target)) return false;
-  const current = readFileSafe(HERMES_CONFIG_PATH);
-  const next = current
-    ? current.replace(/api:\s*http:\/\/127\.0\.0\.1:\d+\/v1/, `api: http://127.0.0.1:${target}/v1`)
-    : [
-        'model:',
-        '  provider: custom:9router',
-        '  default: opencode/big-pickle',
-        'providers:',
-        '  9router:',
-        '    name: 9Router',
-        `    api: http://127.0.0.1:${target}/v1`,
-        '    default_model: opencode/big-pickle',
-        '    transport: chat_completions',
-        '    api_key: ${WORKER_AGENTS_9ROUTER_API_KEY:-local-dev-key}',
-        ''
-      ].join('\n');
-  if (next === current) return false;
-  fs.mkdirSync(path.dirname(HERMES_CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(HERMES_CONFIG_PATH, next, { mode: 0o600 });
-  return true;
-}
 
 function getListenerRows() {
   const rows = execText('ss -tlnp 2>/dev/null || true').split('\n').filter(Boolean);
@@ -140,129 +80,6 @@ function getListenerRows() {
   return execText('netstat -anv -p tcp 2>/dev/null || true').split('\n').filter(Boolean);
 }
 
-function findListenerForPort(port) {
-  const portPattern = new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\*|localhost|\\[::\\]|::|:::|\\.)[:.]${port}(?:\\b|\\s)`);
-  for (const line of getListenerRows()) {
-    if (!portPattern.test(line)) continue;
-    const pidMatch = line.match(/pid=(\d+)/);
-    return {
-      line,
-      pid: pidMatch ? Number.parseInt(pidMatch[1], 10) : null
-    };
-  }
-  const lsofRows = execText(`lsof -nP -iTCP:${port} -sTCP:LISTEN 2>/dev/null || true`).split('\n').filter(Boolean);
-  for (const line of lsofRows.slice(1)) {
-    const pidMatch = line.match(/^\S+\s+(\d+)\s/);
-    return {
-      line,
-      pid: pidMatch ? Number.parseInt(pidMatch[1], 10) : null
-    };
-  }
-  return null;
-}
-
-function kill9RouterListeners() {
-  const seen = new Set();
-  for (const port of ROUTER_PORTS) {
-    const listener = findListenerForPort(port);
-    if (listener?.pid) seen.add(listener.pid);
-  }
-  for (const pid of seen) {
-    execText(`kill ${pid} 2>/dev/null || true`);
-  }
-  execText(`sh -lc "for port in ${ROUTER_PORTS.join(' ')}; do pids=$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null || true); [ -z \"$pids\" ] || kill $pids 2>/dev/null || true; done"`);
-  execText(`sh -lc "for port in ${ROUTER_PORTS.join(' ')}; do hex=$(printf '%04X' "$port"); for inode in $(awk -v hex="$hex" '$2 ~ (":" hex "$") {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u); do for fd in /proc/[0-9]*/fd/[0-9]*; do link=$(readlink "$fd" 2>/dev/null || true); [ "$link" = "socket:[$inode]" ] || continue; pid=\${fd#/proc/}; pid=\${pid%%/*}; kill "$pid" 2>/dev/null || true; done; done; done"`);
-  execText(`sh -lc "pkill -f '/Users/igor/Git-projects/9router' || true"`);
-  execText(`sh -lc "pkill -f '/opt/9router' || true"`);
-  execText(`sh -lc "pkill -f 'node custom-server.js' || true"`);
-  execText(`sh -lc "pkill -f 'next start' || true"`);
-  execText(`sh -lc "sleep 1"`);
-}
-
-function get9RouterStatus(origin) {
-  const configuredPort = parseHermes9RouterPort();
-  const listener = ROUTER_PORTS.map((port) => ({ port, row: findListenerForPort(port) })).find((item) => item.row);
-  const livePort = listener?.port || null;
-  const pid = listener?.row?.pid || null;
-  const logs = readLastLines(ROUTER_LOG_PATH);
-  const running = Boolean(livePort);
-  let state = running ? 'running' : 'error';
-  let error = '';
-
-  if (!running) {
-    error = `9Router is not listening on ${ROUTER_PORTS[0]}-${ROUTER_PORTS.at(-1)}.`;
-  } else if (configuredPort !== livePort) {
-    state = 'error';
-    error = `Hermes points to 127.0.0.1:${configuredPort}, but 9Router is live on 127.0.0.1:${livePort}. Restart 9Router from the console to repoint Hermes WebUI.`;
-  }
-
-  const url = livePort ? `http://127.0.0.1:${livePort}/dashboard/providers` : `http://127.0.0.1:${configuredPort}/dashboard/providers`;
-  let routerUrl = url;
-  try {
-    const publicOrigin = new URL(origin);
-    if (livePort) {
-      publicOrigin.port = String(livePort);
-      publicOrigin.pathname = '/dashboard/providers';
-      publicOrigin.search = '';
-      publicOrigin.hash = '';
-      routerUrl = publicOrigin.toString();
-    }
-  } catch {}
-
-  return {
-    configuredPort,
-    livePort,
-    state,
-    error,
-    url: routerUrl,
-    pid,
-    logs,
-    agent: {
-      id: '__9router__',
-      name: '9Router',
-      state,
-      port: livePort || configuredPort,
-      pid,
-      url: routerUrl,
-      error,
-      startedAt: '',
-      command: '9router',
-      logs
-    }
-  };
-}
-
-async function restartHermesWebUiIfRunning() {
-  const snapshot = supervisor.snapshot().find((agent) => agent.id === 'hermes-webui');
-  if (snapshot?.state === 'running') {
-    try {
-      await supervisor.restart('hermes-webui');
-    } catch (error) {
-      console.warn('[9router] Hermes WebUI restart failed:', error.message);
-    }
-  }
-}
-
-async function handle9RouterAction(action) {
-  if (!['start', 'restart'].includes(action)) {
-    throw new Error(`Unsupported 9Router action: ${action}`);
-  }
-  if (action === 'restart') {
-    kill9RouterListeners();
-  }
-  execText(`sh -lc ": > ${ROUTER_LOG_PATH}; ${build9RouterLaunchCommand()} >> ${ROUTER_LOG_PATH} 2>&1 &"`);
-  const started = Date.now();
-  let status = get9RouterStatus('http://127.0.0.1:1400');
-  while (!status.livePort && Date.now() - started < 15000) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    status = get9RouterStatus('http://127.0.0.1:1400');
-  }
-  if (status.livePort) {
-    const changed = writeHermes9RouterPort(status.livePort);
-    if (changed || action === 'restart') await restartHermesWebUiIfRunning();
-  }
-  return status;
-}
 
 function redirect(res, location) {
   res.writeHead(302, { location });
@@ -416,7 +233,7 @@ async function findAvailablePort(basePort, maxRange) {
 
 function statusPayload(req) {
   const origin = requestOrigin(req);
-  const router = get9RouterStatus(origin);
+  const router = nineRouter.getStatus();
   const agents = supervisor.snapshot().map((agent) => publicAgent(agent, origin));
   const filtered = config.launch
     ? agents.filter((a) => a.id === config.launch)
@@ -483,7 +300,7 @@ async function handleAgentAction(req, res, pathname) {
   const [, id, action] = match;
   if (id === '__9router__') {
     try {
-      const result = await handle9RouterAction(action);
+      const result = action === 'restart' ? await nineRouter.restart(console.log) : await nineRouter.start(console.log);
       sendJson(res, 200, { ok: true, agent: result.agent, router: result });
     } catch (error) {
       sendJson(res, 400, { ok: false, error: error.message });
@@ -660,16 +477,12 @@ try {
     console.error('[setup] Preflight error:', error.message);
   }).then(async () => {
   try {
-    const routerStatus = await handle9RouterAction('restart');
+    const routerStatus = await nineRouter.start(console.log);
     if (!routerStatus.livePort) {
       console.warn('[9router] Startup did not produce a live listener');
     }
   } catch (error) {
     console.error('[9router] Startup error:', error.message);
-  }
-  const router = get9RouterStatus(`http://${config.host}:${resolvedPort}`);
-  if (router.livePort) {
-    writeHermes9RouterPort(router.livePort);
   }
   if (config.launch) {
     if (supervisor.agents.has(config.launch)) {

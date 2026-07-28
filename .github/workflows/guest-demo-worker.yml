@@ -25,7 +25,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
@@ -152,68 +151,36 @@ jobs:
 
           APP_PORT=1456
           TUNNEL_PREFIX="${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
-          WORKER_PUBLIC_NAME="${TUNNEL_PREFIX}-worker-agents"
-          WORKER_URL="http://${WORKER_PUBLIC_NAME}.lolgames.net:${APP_PORT}"
           LIFETIME="${{ inputs.demo_lifetime_seconds }}"
           if [[ -z "$LIFETIME" ]]; then
             LIFETIME=18000
           fi
-          RENEW_AFTER=$(( LIFETIME * 70 / 100 ))
-          STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          EXPIRES_AT="$(date -u -d "@$(( $(date +%s) + LIFETIME ))" +%Y-%m-%dT%H:%M:%SZ)"
-          RENEW_AT="$(date -u -d "@$(( $(date +%s) + RENEW_AFTER ))" +%Y-%m-%dT%H:%M:%SZ)"
+          export APP_PORT
+          export LOLGAMES_TUNNEL_PREFIX="$TUNNEL_PREFIX"
+          export WORKER_APP_SOURCE_DIR="$GITHUB_WORKSPACE/workerAgents"
+          export TUNNEL_CLIENT_PATH="$GITHUB_WORKSPACE/scripts/lolgames_tunnel.py"
+          export START_CHILD_AGENTS=0
+          export INSTALL_CHILD_DEPS=0
+          export PUBLISH_CHILD_AGENT_PORTS=0
+          export PROVISION_TRACE=1
+          export RUN_TOKEN="guest-demo"
+          bash "$GITHUB_WORKSPACE/scripts/provision-worker-runtime.sh" | tee /tmp/worker-provision.log
 
-          cd workerAgents
-          npm install
-          TMUX='' tmux -L workeragents -f /dev/null kill-server 2>/dev/null || true
-          TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents \
-            "cd '$PWD' && PORT=$APP_PORT AGENT_CONSOLE_HOST=127.0.0.1 npm start > ~/worker-agents.log 2>&1"
-
-          for _ in $(seq 1 90); do
-            if curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/tmp/worker-agents-status.json
-
-          nohup python3 ../scripts/lolgames_tunnel.py client "127.0.0.1:${APP_PORT}" \
-            --server 161.153.109.33 \
-            --name "$WORKER_PUBLIC_NAME" \
-            --same-port \
-            > ~/worker-agents-lolgames.log 2>&1 &
-          WORKER_TUNNEL_PID=$!
-
-          mkdir -p ~/.worker-agents
-          python3 - <<PY
-          import json, os
-          payload = {
-              'status': 'running',
-              'url': '$WORKER_URL',
-              'worker_agents_url': '$WORKER_URL',
-              'port': $APP_PORT,
-              'lolgames_tunnel_prefix': '$TUNNEL_PREFIX',
-              'ssh_host': '${{ steps.lolgames_ssh.outputs.host }}',
-              'ssh_port': '${{ steps.lolgames_ssh.outputs.port }}',
-              'started_at': '$STARTED_AT',
-              'expires_at': '$EXPIRES_AT',
-              'renew_at': '$RENEW_AT',
-              'demo_lifetime_seconds': $LIFETIME,
-              'renew_after_seconds': $RENEW_AFTER,
-          }
-          os.makedirs(os.path.expanduser('~/.worker-agents'), exist_ok=True)
-          with open(os.path.expanduser('~/.worker-agents/state.json'), 'w', encoding='utf-8') as f:
-              json.dump(payload, f, indent=2)
-              f.write('\n')
-          with open('/tmp/guest-demo-metadata.json', 'w', encoding='utf-8') as f:
-              json.dump(payload, f, indent=2)
-              f.write('\n')
+          STATE_JSON="$HOME/.worker-agents/state.json"
+          test -f "$STATE_JSON"
+          WORKER_URL="$(python3 - "$STATE_JSON" <<'PY'
+          import json, sys
+          print((json.load(open(sys.argv[1], encoding='utf-8')).get('worker_agents_url') or '').strip())
           PY
+          )"
+          if [[ -z "$WORKER_URL" ]]; then
+            echo "Guest demo worker URL missing after provision" >&2
+            exit 1
+          fi
+          cp "$STATE_JSON" /tmp/guest-demo-metadata.json
 
           echo "worker_agents_url=$WORKER_URL" >> "$GITHUB_OUTPUT"
           echo "demo_lifetime_seconds=$LIFETIME" >> "$GITHUB_OUTPUT"
-          echo "renew_after_seconds=$RENEW_AFTER" >> "$GITHUB_OUTPUT"
-          echo "worker_tunnel_pid=$WORKER_TUNNEL_PID" >> "$GITHUB_OUTPUT"
           echo "Guest demo Worker Agents: $WORKER_URL"
 
       - name: Upload guest demo metadata artifact
@@ -223,54 +190,10 @@ jobs:
           path: /tmp/guest-demo-metadata.json
           if-no-files-found: error
 
-      - name: Wait until renewal point
-        shell: bash
-        run: |
-          set -euo pipefail
-          sleep "${{ steps.worker_agents.outputs.renew_after_seconds }}"
-
-      - name: Dispatch successor run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          payload="$(python3 - <<'PY'
-          import json
-          payload = {
-              "ref": "${{ github.ref_name }}",
-              "inputs": {
-                  "ssh_public_key": """${{ inputs.ssh_public_key }}""".strip(),
-                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.public_name }}""".strip(),
-                  "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
-                  "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
-                  "demo_lifetime_seconds": """${{ steps.worker_agents.outputs.demo_lifetime_seconds }}""".strip(),
-              },
-          }
-          print(json.dumps(payload))
-          PY
-          )"
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/guest-demo-worker.yml/dispatches" \
-            -d "$payload"
-          date -u +%Y-%m-%dT%H:%M:%SZ >/tmp/guest-demo-renewal.txt
-
-      - name: Upload renewal status artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: guest-demo-renewal
-          path: /tmp/guest-demo-renewal.txt
-          if-no-files-found: error
-
-      - name: Keep alive until reset
+      - name: Keep guest demo alive until reset
         shell: bash
         run: |
           set -euo pipefail
           lifetime="${{ steps.worker_agents.outputs.demo_lifetime_seconds }}"
-          renew_after="${{ steps.worker_agents.outputs.renew_after_seconds }}"
-          remaining=$(( lifetime - renew_after ))
-          echo "Successor dispatched; keeping current demo alive for ${remaining}s handoff/reset window."
-          sleep "$remaining"
+          echo "Keeping guest demo alive for ${lifetime}s until reset."
+          sleep "$lifetime"

@@ -57,7 +57,11 @@ async def handle_control(r,w):
     port=int(hello.get('public_port', 0))
     key=(sub,port)
     lock=asyncio.Lock()
-    CTRL_BY_KEY[key]=(r,w,lock)
+    session=(r,w,lock)
+    prev = CTRL_BY_KEY.get(key)
+    if prev:
+        print(f'WARNING: replacing existing tunnel registration for key={key!r}', file=sys.stderr, flush=True)
+    CTRL_BY_KEY[key]=session
     display_port = int(hello.get('display_port') or port)
     url = f'http://{sub}.{DOMAIN}:{display_port}' if display_port else f'http://{sub}.{DOMAIN}'
     await send(w, {'type':'registered','url':url,'subdomain':sub,'port':port}, lock)
@@ -71,7 +75,8 @@ async def handle_control(r,w):
             q=REG.get(('conn', msg.get('id')))
             if q: await q.put(msg)
     finally:
-        CTRL_BY_KEY.pop(key,None)
+        if CTRL_BY_KEY.get(key) is session:
+            CTRL_BY_KEY.pop(key,None)
         w.close()
         try: await w.wait_closed()
         except Exception: pass
