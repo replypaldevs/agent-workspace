@@ -52,7 +52,7 @@ async function stepTmpdirs() {
 }
 
 const SKILLS_REPO = process.env.WORKER_AGENTS_SKILLS_REPO || 'https://github.com/phaneron23/skills.git';
-const SKILLS_BRANCH = process.env.WORKER_AGENTS_SKILLS_BRANCH || 'main';
+const SKILLS_BRANCH = String(process.env.WORKER_AGENTS_SKILLS_BRANCH || '').trim();
 const SKILLS_DIR = process.env.WORKER_AGENTS_SKILLS_DIR || path.join(process.env.HOME || '/tmp', '.worker-agents', 'skills');
 const STATE_DIR = process.env.WORKER_AGENTS_STATE_DIR || path.join(process.env.HOME || '/tmp', '.worker-agents');
 const STATE_PATH = path.join(STATE_DIR, 'state.json');
@@ -69,9 +69,10 @@ function trySyncOnce(sharedSkillsDir = SKILLS_DIR) {
   return new Promise((resolve) => {
     ensureDir(path.dirname(sharedSkillsDir));
     const isCloned = fs.existsSync(path.join(sharedSkillsDir, '.git'));
+    const cloneBranch = SKILLS_BRANCH ? ` --branch "${SKILLS_BRANCH}"` : '';
     const cmd = isCloned
       ? `cd "${sharedSkillsDir}" && git pull --ff-only`
-      : `git clone --branch "${SKILLS_BRANCH}" --depth 1 "${SKILLS_REPO}" "${sharedSkillsDir}"`;
+      : `git clone${cloneBranch} --depth 1 "${SKILLS_REPO}" "${sharedSkillsDir}"`;
     const child = spawn('/bin/sh', ['-lc', cmd], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
