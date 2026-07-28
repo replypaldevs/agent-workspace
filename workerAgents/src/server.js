@@ -344,6 +344,12 @@ function handleEvents(req, res) {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || `${config.host}:${config.port}`}`);
 
+  if (url.pathname === '/favicon.ico' && (req.method === 'GET' || req.method === 'HEAD')) {
+    res.writeHead(204, { 'cache-control': 'public, max-age=86400' });
+    res.end();
+    return;
+  }
+
   if (url.pathname === '/api/status' && req.method === 'GET') {
     sendJson(res, 200, statusPayload(req));
     return;
