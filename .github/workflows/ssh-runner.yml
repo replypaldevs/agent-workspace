@@ -200,6 +200,13 @@ jobs:
           sudo incus config unset "$VM_NAME" volatile.eth0.hwaddr >/dev/null 2>&1 || true
           sudo incus start "$VM_NAME"
 
+          if [[ -n '${{ inputs.incus_bootstrap_script_b64 }}' ]]; then
+            printf '%s' '${{ inputs.incus_bootstrap_script_b64 }}' | base64 -d >/tmp/incus-restored-refresh.sh
+            chmod +x /tmp/incus-restored-refresh.sh
+            sudo incus file push /tmp/incus-restored-refresh.sh "$VM_NAME/root/incus-restored-refresh.sh"
+            sudo incus exec "$VM_NAME" -- bash /root/incus-restored-refresh.sh
+          fi
+
           {
             echo "restored_vm_name=$VM_NAME"
             echo "restored_snapshot_id=$SNAPSHOT_ID"
