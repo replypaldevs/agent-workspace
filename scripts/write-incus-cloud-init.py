@@ -22,7 +22,6 @@ write_files:
       done
   - path: /root/incus-bootstrap-extra.b64
     permissions: '0600'
-    encoding: b64
     content: {bootstrap_b64}
 runcmd:
   - [ bash, -lc, 'pgrep -af /root/incus-heartbeat.sh >/dev/null 2>&1 || nohup /root/incus-heartbeat.sh >/root/incus-heartbeat.stdout 2>&1 &' ]
