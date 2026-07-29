@@ -19,6 +19,30 @@ npm install
 npm start
 ```
 
+For a clean local 9Router bootstrap from scratch:
+
+```bash
+npm run start:clean-9router
+```
+
+That command also kills any stale local listener on port `20127` first, so an old deleted 9Router process cannot keep serving broken `500` responses.
+
+For a clean local OpenCode reinstall/bootstrap from scratch:
+
+```bash
+npm run start:clean-opencode
+```
+
+That command kills any stale local listener on port `18924`, uninstalls the global `opencode-ai` package, removes local `~/.opencode` state, and then starts Worker Agents.
+
+For a clean local reset of both 9Router and OpenCode before boot:
+
+```bash
+npm run start:clean-all
+```
+
+That command kills stale listeners on ports `20127` and `18924`, removes local 9Router/OpenCode state, uninstalls the global `opencode-ai` package, and then starts Worker Agents.
+
 Open the console at:
 
 ```text

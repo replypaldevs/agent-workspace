@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { spawn } from 'node:child_process';
@@ -94,6 +95,10 @@ function prepareStandalone() {
   if (fs.existsSync(publicSrc)) execText(`cp -R "${publicSrc}" "${publicDst}"`);
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\"'\"'`)}'`;
+}
+
 function buildLaunchCommand(port = ROUTER_PORT) {
   const dataDir = path.join(process.env.HOME || '/tmp', '.9router', 'data');
   return [
@@ -108,6 +113,48 @@ function buildLaunchCommand(port = ROUTER_PORT) {
     `cd "${path.join(ROUTER_HOME, '.next', 'standalone')}"`,
     'exec node server.js',
   ].join('; ');
+}
+
+function buildBootstrapCommand(port = ROUTER_PORT) {
+  const standaloneDir = path.join(ROUTER_HOME, '.next', 'standalone');
+  const staticSrc = path.join(ROUTER_HOME, '.next', 'static');
+  const staticDst = path.join(standaloneDir, '.next', 'static');
+  const publicSrc = path.join(ROUTER_HOME, 'public');
+  const publicDst = path.join(standaloneDir, 'public');
+  return [
+    'set -e',
+    `export PATH=${shellQuote(defaultPath)}`,
+    `ROUTER_HOME=${shellQuote(ROUTER_HOME)}`,
+    `ROUTER_GIT_URL=${shellQuote(ROUTER_GIT_URL)}`,
+    `ROUTER_PORT=${shellQuote(port)}`,
+    `STANDALONE_DIR=${shellQuote(standaloneDir)}`,
+    `STATIC_SRC=${shellQuote(staticSrc)}`,
+    `STATIC_DST=${shellQuote(staticDst)}`,
+    `PUBLIC_SRC=${shellQuote(publicSrc)}`,
+    `PUBLIC_DST=${shellQuote(publicDst)}`,
+    'if [ ! -f "$ROUTER_HOME/package.json" ]; then',
+    '  echo "[9router] Cloning $ROUTER_GIT_URL..."',
+    '  rm -rf "$ROUTER_HOME"',
+    '  git clone --depth 1 "$ROUTER_GIT_URL" "$ROUTER_HOME"',
+    '  echo "[9router] Clone complete"',
+    'else',
+    '  echo "[9router] Repo already exists"',
+    'fi',
+    'if [ ! -f "$STANDALONE_DIR/server.js" ]; then',
+    '  echo "[9router] Building..."',
+    '  cd "$ROUTER_HOME"',
+    '  npm install',
+    '  npm run build',
+    '  echo "[9router] Build complete"',
+    'else',
+    '  echo "[9router] Already built"',
+    'fi',
+    'mkdir -p "$(dirname "$STATIC_DST")"',
+    'rm -rf "$STATIC_DST" "$PUBLIC_DST"',
+    'if [ -d "$STATIC_SRC" ]; then cp -R "$STATIC_SRC" "$STATIC_DST"; fi',
+    'if [ -d "$PUBLIC_SRC" ]; then cp -R "$PUBLIC_SRC" "$PUBLIC_DST"; fi',
+    buildLaunchCommand(port)
+  ].join('\n');
 }
 
 function writeHermesConfig(port = ROUTER_PORT) {
@@ -141,11 +188,18 @@ async function waitForHealth(timeoutMs = HEALTH_TIMEOUT_MS) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
-      const result = execSync(
-        `curl -fsS --max-time 5 http://127.0.0.1:${ROUTER_PORT}/api/health`,
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }
-      );
-      if (result) return true;
+      const ok = await new Promise((resolve) => {
+        const req = http.get(`http://127.0.0.1:${ROUTER_PORT}/api/health`, (res) => {
+          res.resume();
+          resolve((res.statusCode || 500) < 400);
+        });
+        req.setTimeout(5000, () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.on('error', () => resolve(false));
+      });
+      if (ok) return true;
     } catch {
       // not ready yet
     }
@@ -159,44 +213,44 @@ export async function start(log) {
   if (live && live > 0) return getStatus();
   if (startupPromise) return getStatus();
   startupError = '';
-  startupPromise = (async () => {
-    try {
-      startupState = 'installing';
-      await ensureRepo(log);
-      await ensureBuilt(log);
-      prepareStandalone();
-      killExistingListeners();
-      startupState = 'starting';
-      if (log) log(`[9router] Starting on port ${ROUTER_PORT}...`);
-      const cmd = buildLaunchCommand();
-      const logFd = fs.openSync(ROUTER_LOG_PATH, 'w');
-      const child = spawn('sh', ['-lc', cmd], {
-        detached: true,
-        stdio: ['ignore', logFd, logFd],
-        env: { ...process.env, PATH: defaultPath },
-      });
-      child.unref();
-      fs.closeSync(logFd);
-      if (log) log(`[9router] Process started (pid ${child.pid})`);
-      const healthy = await waitForHealth();
-      if (healthy) {
-        startupState = 'running';
-        if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
-        writeHermesConfig();
-      } else {
+  startupState = 'installing';
+  startupPromise = new Promise((resolve, reject) => {
+    setTimeout(async () => {
+      try {
+        killExistingListeners();
+        if (log) log(`[9router] Starting background bootstrap on port ${ROUTER_PORT}...`);
+        const cmd = buildBootstrapCommand();
+        const logFd = fs.openSync(ROUTER_LOG_PATH, 'w');
+        const child = spawn('sh', ['-lc', cmd], {
+          detached: true,
+          stdio: ['ignore', logFd, logFd],
+          env: { ...process.env, PATH: defaultPath },
+        });
+        child.unref();
+        fs.closeSync(logFd);
+        startupState = 'starting';
+        if (log) log(`[9router] Bootstrap process started (pid ${child.pid})`);
+        const healthy = await waitForHealth();
+        if (healthy) {
+          startupState = 'running';
+          if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
+          writeHermesConfig();
+        } else {
+          startupState = 'error';
+          startupError = `9Router health check failed after ${HEALTH_TIMEOUT_MS / 1000}s.`;
+          if (log) log(`[9router] Health check failed after ${HEALTH_TIMEOUT_MS / 1000}s`);
+        }
+        resolve(getStatus());
+      } catch (error) {
         startupState = 'error';
-        startupError = `9Router health check failed after ${HEALTH_TIMEOUT_MS / 1000}s.`;
-        if (log) log(`[9router] Health check failed after ${HEALTH_TIMEOUT_MS / 1000}s`);
+        startupError = error.message;
+        if (log) log(`[9router] Startup error: ${error.message}`);
+        reject(error);
+      } finally {
+        startupPromise = null;
       }
-    } catch (error) {
-      startupState = 'error';
-      startupError = error.message;
-      if (log) log(`[9router] Startup error: ${error.message}`);
-      throw error;
-    } finally {
-      startupPromise = null;
-    }
-  })();
+    }, 0);
+  });
   return getStatus();
 }
 

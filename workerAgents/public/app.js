@@ -7,6 +7,7 @@ const connectionState = document.querySelector('#connectionState');
 const logSelect = document.querySelector('#logSelect');
 const logTitle = document.querySelector('#logTitle');
 const logOutput = document.querySelector('#logOutput');
+const logPanel = document.querySelector('.log-panel');
 
 let state = { auth: { loggedIn: false }, agents: [] };
 let selectedLogId = '';
@@ -66,7 +67,7 @@ function updateAuth(auth, router) {
 }
 
 function renderAgent(agent) {
-  const busy = ['starting', 'stopping'].includes(agent.state);
+  const busy = ['installing', 'starting', 'stopping'].includes(agent.state);
   const canOpen = agent.state === 'running';
   const canStop = agent.state === 'running' || agent.state === 'error' || agent.state === 'starting' || agent.state === 'installing';
   const article = document.createElement('article');
@@ -122,6 +123,10 @@ function renderLogs() {
   logOutput.scrollTop = logOutput.scrollHeight;
 }
 
+function scrollLogsIntoView() {
+  logPanel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function render(payload) {
   state = payload;
   if (buildVersionEl && state.version) {
@@ -169,6 +174,7 @@ grid.addEventListener('click', async (event) => {
     selectedLogId = id;
     logSelect.value = id;
     renderLogs();
+    scrollLogsIntoView();
     return;
   }
   target.disabled = true;
@@ -184,6 +190,7 @@ grid.addEventListener('click', async (event) => {
   selectedLogId = id;
   logSelect.value = id;
   renderLogs();
+  scrollLogsIntoView();
 });
 
 logSelect.addEventListener('change', () => {

@@ -174,14 +174,22 @@ jobs:
             sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
           fi
 
-          # Ensure incus bridge has internet access via iptables
-          if ! sudo iptables -C FORWARD -i incusbr0 -o eth0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -i incusbr0 -o eth0 -j ACCEPT
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
           fi
-          if ! sudo iptables -C FORWARD -o incusbr0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -o incusbr0 -j ACCEPT
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
           fi
-          echo "Incus bridge iptables rules configured"
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
 
           SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
@@ -208,6 +216,8 @@ jobs:
             sleep 2
           done
           sudo incus exec "$VM_NAME" -- true >/dev/null
+          sudo incus file push scripts/fix-restored-incus-network.sh "$VM_NAME/root/fix-restored-incus-network.sh"
+          sudo incus exec "$VM_NAME" -- bash /root/fix-restored-incus-network.sh
 
           if [[ -n '${{ inputs.incus_bootstrap_script_b64 }}' ]]; then
             printf '%s' '${{ inputs.incus_bootstrap_script_b64 }}' | base64 -d >/tmp/incus-restored-refresh.sh
@@ -263,14 +273,22 @@ jobs:
             sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
           fi
 
-          # Ensure incus bridge has internet access via iptables
-          if ! sudo iptables -C FORWARD -i incusbr0 -o eth0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -i incusbr0 -o eth0 -j ACCEPT
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
           fi
-          if ! sudo iptables -C FORWARD -o incusbr0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -o incusbr0 -j ACCEPT
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
           fi
-          echo "Incus bridge iptables rules configured"
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
 
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
 
@@ -356,14 +374,22 @@ jobs:
             sudo incus profile device add default eth0 nic network=incusbr0 name=eth0
           fi
 
-          # Ensure incus bridge has internet access via iptables
-          if ! sudo iptables -C FORWARD -i incusbr0 -o eth0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -i incusbr0 -o eth0 -j ACCEPT
+          # Ensure Incus bridge has outbound internet after fresh boot or snapshot restore.
+          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+          HOST_IFACE="$(ip route show default 0.0.0.0/0 | awk '{print $5; exit}')"
+          if [[ -z "$HOST_IFACE" ]]; then
+            HOST_IFACE="eth0"
           fi
-          if ! sudo iptables -C FORWARD -o incusbr0 -j ACCEPT 2>/dev/null; then
-            sudo iptables -A FORWARD -o incusbr0 -j ACCEPT
+          if ! sudo iptables -C FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -i incusbr0 -o "$HOST_IFACE" -j ACCEPT
           fi
-          echo "Incus bridge iptables rules configured"
+          if ! sudo iptables -C FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+            sudo iptables -A FORWARD -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+          if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$HOST_IFACE" -j MASQUERADE
+          fi
+          echo "Incus bridge iptables rules configured for $HOST_IFACE"
 
           VM_NAME="${{ inputs.incus_stateful_vm_name }}"
           RELEASE_TAG="${{ inputs.incus_stateful_release_tag }}"
@@ -396,7 +422,8 @@ jobs:
           sudo rm -f "$SNAPSHOT_PATH"
           sudo touch "$SNAPSHOT_PATH"
           sudo chmod 666 "$SNAPSHOT_PATH"
-          sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
+          timeout "${INCUS_EXPORT_TIMEOUT_SECONDS:-300}" sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
+          [[ -s "$SNAPSHOT_PATH" ]] || { echo "Incus export produced an empty snapshot: $SNAPSHOT_PATH" >&2; exit 1; }
           sudo chown "$USER:$USER" "$SNAPSHOT_PATH"
 
           chmod +x scripts/transfer-worker-snapshot-via-release.sh
