@@ -121,6 +121,25 @@ function publicAgent(agent, origin) {
   }
 }
 
+function publicRouter(router, origin) {
+  try {
+    const publicOrigin = new URL(origin);
+    const rebase = (url) => {
+      const rebased = new URL(url);
+      rebased.protocol = publicOrigin.protocol;
+      rebased.hostname = publicOrigin.hostname;
+      return rebased.toString();
+    };
+    return {
+      ...router,
+      url: rebase(router.url),
+      agent: router.agent ? { ...router.agent, url: rebase(router.agent.url) } : router.agent
+    };
+  } catch {
+    return router;
+  }
+}
+
 function getOpenClawProxyTarget() {
   const snapshot = supervisor.snapshot().find((agent) => agent.id === 'openclaw');
   if (!snapshot?.port || snapshot.state !== 'running') return null;
@@ -233,7 +252,7 @@ async function findAvailablePort(basePort, maxRange) {
 
 function statusPayload(req) {
   const origin = requestOrigin(req);
-  const router = nineRouter.getStatus();
+  const router = publicRouter(nineRouter.getStatus(), origin);
   const agents = supervisor.snapshot().map((agent) => publicAgent(agent, origin));
   const filtered = config.launch
     ? agents.filter((a) => a.id === config.launch)
@@ -484,15 +503,14 @@ try {
   // Idempotent filesystem preflight (non-fatal)
   runSetup().catch((error) => {
     console.error('[setup] Preflight error:', error.message);
-  }).then(async () => {
-  try {
-    const routerStatus = await nineRouter.start(console.log);
-    if (!routerStatus.livePort) {
-      console.warn('[9router] Startup did not produce a live listener');
+  }).then(() => {
+  nineRouter.start(console.log).then((routerStatus) => {
+    if (routerStatus.state === 'error' && !routerStatus.livePort) {
+      console.warn('[9router] Background startup did not produce a live listener');
     }
-  } catch (error) {
+  }).catch((error) => {
     console.error('[9router] Startup error:', error.message);
-  }
+  });
   if (config.launch) {
     if (supervisor.agents.has(config.launch)) {
       console.log(`Launch mode: auto-starting agent "${config.launch}"...`);

@@ -12,6 +12,9 @@ const ROUTER_API_KEY = process.env.WORKER_AGENTS_9ROUTER_API_KEY || 'local-dev-k
 const ROUTER_MODEL = process.env.WORKER_AGENTS_9ROUTER_MODEL || 'openai/gpt-5.4-mini';
 const HEALTH_TIMEOUT_MS = Number.parseInt(process.env.ROUTER_HEALTH_TIMEOUT_MS || '120000', 10);
 const HEALTH_POLL_MS = 2000;
+let startupPromise = null;
+let startupState = 'idle';
+let startupError = '';
 
 function execText(command) {
   try {
@@ -152,35 +155,49 @@ async function waitForHealth(timeoutMs = HEALTH_TIMEOUT_MS) {
 }
 
 export async function start(log) {
-  await ensureRepo(log);
-  await ensureBuilt(log);
-  prepareStandalone();
-  killExistingListeners();
-  if (log) log(`[9router] Starting on port ${ROUTER_PORT}...`);
-  const cmd = buildLaunchCommand();
-  const logFd = fs.openSync(ROUTER_LOG_PATH, 'w');
-  const child = spawn('sh', ['-lc', cmd], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, PATH: defaultPath },
-  });
-  child.unref();
-  fs.closeSync(logFd);
-  if (log) log(`[9router] Process started (pid ${child.pid})`);
-  const healthy = await waitForHealth();
-  if (healthy) {
-    if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
-    writeHermesConfig();
-  } else {
-    if (log) log(`[9router] Health check failed after ${HEALTH_TIMEOUT_MS / 1000}s`);
-  }
-  const status = getStatus();
-  return {
-    ...status,
-    healthy,
-    port: ROUTER_PORT,
-    pid: status.pid || child.pid,
-  };
+  const live = findListenerForPort(ROUTER_PORT);
+  if (live && live > 0) return getStatus();
+  if (startupPromise) return getStatus();
+  startupError = '';
+  startupPromise = (async () => {
+    try {
+      startupState = 'installing';
+      await ensureRepo(log);
+      await ensureBuilt(log);
+      prepareStandalone();
+      killExistingListeners();
+      startupState = 'starting';
+      if (log) log(`[9router] Starting on port ${ROUTER_PORT}...`);
+      const cmd = buildLaunchCommand();
+      const logFd = fs.openSync(ROUTER_LOG_PATH, 'w');
+      const child = spawn('sh', ['-lc', cmd], {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: { ...process.env, PATH: defaultPath },
+      });
+      child.unref();
+      fs.closeSync(logFd);
+      if (log) log(`[9router] Process started (pid ${child.pid})`);
+      const healthy = await waitForHealth();
+      if (healthy) {
+        startupState = 'running';
+        if (log) log(`[9router] Health check passed on port ${ROUTER_PORT}`);
+        writeHermesConfig();
+      } else {
+        startupState = 'error';
+        startupError = `9Router health check failed after ${HEALTH_TIMEOUT_MS / 1000}s.`;
+        if (log) log(`[9router] Health check failed after ${HEALTH_TIMEOUT_MS / 1000}s`);
+      }
+    } catch (error) {
+      startupState = 'error';
+      startupError = error.message;
+      if (log) log(`[9router] Startup error: ${error.message}`);
+      throw error;
+    } finally {
+      startupPromise = null;
+    }
+  })();
+  return getStatus();
 }
 
 export function getStatus() {
@@ -191,22 +208,40 @@ export function getStatus() {
   try {
     logs = fs.readFileSync(ROUTER_LOG_PATH, 'utf8').trimEnd().split('\n').slice(-120);
   } catch { /* no log yet */ }
+  const state = running
+    ? 'running'
+    : startupState === 'installing'
+      ? 'installing'
+      : startupState === 'starting'
+        ? 'starting'
+        : startupState === 'stopped'
+          ? 'stopped'
+          : 'error';
+  const error = running
+    ? ''
+    : (startupError || (state === 'installing'
+      ? '9Router is preparing its local checkout and build.'
+      : state === 'starting'
+        ? '9Router is starting in the background.'
+        : state === 'stopped'
+          ? ''
+          : `9Router is not listening on port ${ROUTER_PORT}.`));
   return {
     configuredPort: ROUTER_PORT,
     livePort: running ? ROUTER_PORT : null,
-    state: running ? 'running' : 'error',
-    error: running ? '' : `9Router is not listening on port ${ROUTER_PORT}.`,
+    state,
+    error,
     pid,
     logs,
     url: `http://127.0.0.1:${ROUTER_PORT}/dashboard/providers`,
     agent: {
       id: '__9router__',
       name: '9Router',
-      state: running ? 'running' : 'error',
+      state,
       port: ROUTER_PORT,
       pid,
       url: `http://127.0.0.1:${ROUTER_PORT}/dashboard/providers`,
-      error: running ? '' : `9Router is not listening on port ${ROUTER_PORT}.`,
+      error,
       startedAt: '',
       command: '9router',
       logs,
@@ -215,11 +250,17 @@ export function getStatus() {
 }
 
 export async function restart(log) {
+  startupPromise = null;
+  startupState = 'idle';
+  startupError = '';
   killExistingListeners();
   return start(log);
 }
 
 export async function stop(log) {
+  startupPromise = null;
+  startupState = 'stopped';
+  startupError = '';
   const pid = killExistingListeners();
   if (log) {
     if (pid) log(`[9router] Stopped pid ${pid}`);
