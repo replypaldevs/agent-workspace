@@ -300,7 +300,10 @@ async function handleAgentAction(req, res, pathname) {
   const [, id, action] = match;
   if (id === '__9router__') {
     try {
-      const result = action === 'restart' ? await nineRouter.restart(console.log) : await nineRouter.start(console.log);
+      const result =
+        action === 'restart' ? await nineRouter.restart(console.log)
+        : action === 'stop' ? await nineRouter.stop(console.log)
+        : await nineRouter.start(console.log);
       sendJson(res, 200, { ok: true, agent: result.agent, router: result });
     } catch (error) {
       sendJson(res, 400, { ok: false, error: error.message });

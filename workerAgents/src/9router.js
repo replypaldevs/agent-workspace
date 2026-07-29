@@ -43,6 +43,7 @@ function killExistingListeners() {
     execText(`kill ${pid} 2>/dev/null || true`);
     execText(`sleep 1`);
   }
+  return pid && pid > 0 ? pid : null;
 }
 
 async function ensureRepo(log) {
@@ -216,6 +217,15 @@ export function getStatus() {
 export async function restart(log) {
   killExistingListeners();
   return start(log);
+}
+
+export async function stop(log) {
+  const pid = killExistingListeners();
+  if (log) {
+    if (pid) log(`[9router] Stopped pid ${pid}`);
+    else log('[9router] Already stopped');
+  }
+  return getStatus();
 }
 
 export { ROUTER_PORT, ROUTER_API_KEY, ROUTER_MODEL };

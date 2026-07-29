@@ -58,6 +58,7 @@ function renderAgent(agent) {
   const busy = ['starting', 'stopping'].includes(agent.state);
   const canOpen = agent.state === 'running';
   const openUrl = publicAgentUrl(agent);
+  const canStop = agent.state === 'running' || agent.state === 'error';
   const article = document.createElement('article');
   article.className = 'agent-card';
   article.innerHTML = `
@@ -75,6 +76,7 @@ function renderAgent(agent) {
     <div class="agent-actions">
       <button class="button primary" data-action="start" data-id="${agent.id}" ${busy || agent.state === 'running' ? 'disabled' : ''}>Start</button>
       <button class="button ghost" data-action="restart" data-id="${agent.id}" ${busy ? 'disabled' : ''}>Restart</button>
+      <button class="button stop" data-action="stop" data-id="${agent.id}" ${busy || !canStop ? 'disabled' : ''}>Stop</button>
       <a class="button ghost" href="${escapeAttribute(openUrl)}" ${canOpen ? '' : 'aria-disabled="true"'}>Open</a>
       <a class="button ghost" href="${escapeAttribute(openUrl)}" target="_blank" rel="noreferrer" ${canOpen ? '' : 'aria-disabled="true"'}>Web</a>
       <button class="button ghost" data-action="logs" data-id="${agent.id}">Logs</button>
@@ -164,7 +166,7 @@ grid.addEventListener('click', async (event) => {
   const agent = state.agents.find(a => a.id === id);
   if (agent) {
     if (action === 'start') agent.state = 'installing';
-    else if (action === 'restart') agent.state = 'stopping';
+    else if (action === 'restart' || action === 'stop') agent.state = 'stopping';
     renderAgents(state.agents);
   }
   await postAction(id, action);
