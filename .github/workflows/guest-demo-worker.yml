@@ -43,7 +43,7 @@ jobs:
       - name: Check out Worker Agents
         uses: actions/checkout@v4
         with:
-          repository: OpenWebAgents/workerAgents
+          repository: replypaldevs/workerAgents
           ref: main
           path: workerAgents
 

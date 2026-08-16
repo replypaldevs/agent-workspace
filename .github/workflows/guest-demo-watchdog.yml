@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          resolver='https://agentsweb.space/api/last-worker?repo=alexcheng-dev%2Fagent-workspace&refresh=1'
+          resolver='https://agentsweb.space/api/last-worker?repo=replypaldevs%2Fagent-workspace&refresh=1'
           payload="$(curl --fail --retry 2 --retry-delay 2 --max-time 20 "$resolver")"
           echo "$payload"
           ready="$(jq -r 'select(.readiness == "app_ready" and (.url | type == "string") and (.url | length > 0)) | .url // empty' <<<"$payload")"
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          resolver='https://agentsweb.space/api/last-worker?repo=alexcheng-dev%2Fagent-workspace&refresh=1'
+          resolver='https://agentsweb.space/api/last-worker?repo=replypaldevs%2Fagent-workspace&refresh=1'
           payload="$(curl --fail --retry 2 --retry-delay 2 --max-time 20 "$resolver")"
           ready="$(jq -r 'select(.readiness == "app_ready" and (.url | type == "string") and (.url | length > 0)) | .url // empty' <<<"$payload")"
           if [[ -n "$ready" ]]; then
