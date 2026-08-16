@@ -1,0 +1,98 @@
+name: 🪟 Windows SSH Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
+      lolgames_ssh_name:
+        description: Stable agentsweb SSH hostname prefix
+        required: false
+        type: string
+      lolgames_ssh_port:
+        description: Stable agentsweb SSH public port
+        required: false
+        type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents agentsweb prefix
+        required: false
+        type: string
+      test_sleep_seconds:
+        description: Override keepalive sleep seconds. Default 18000 (5h).
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: windows-ssh-runner-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  ssh-session:
+    runs-on: windows-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start SSH over agentsweb
+        id: lolgames_ssh
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh", "$env:RUNNER_TEMP\lolgames-ssh" | Out-Null
+          '${{ inputs.ssh_public_key }}' | Out-File -FilePath "$env:USERPROFILE\.ssh\authorized_keys" -Encoding ascii -Append
+
+          New-Item -ItemType Directory -Force -Path 'C:\tmp' | Out-Null
+          New-Item -Path HKLM:\SOFTWARE\OpenSSH -Force | Out-Null
+          New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell -Value 'C:\Program Files\Git\bin\bash.exe' -PropertyType String -Force | Out-Null
+          Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+          Start-Service sshd
+          Set-Service -Name sshd -StartupType Manual
+          New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue | Out-Null
+
+          $adminKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+          '${{ inputs.ssh_public_key }}' | Out-File -FilePath $adminKeys -Encoding ascii -Append
+          icacls.exe $adminKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+
+          for ($i = 0; $i -lt 30; $i++) {
+            if ((Test-NetConnection -ComputerName 127.0.0.1 -Port 22 -InformationLevel Quiet)) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not (Test-NetConnection -ComputerName 127.0.0.1 -Port 22 -InformationLevel Quiet)) { throw 'sshd did not start' }
+
+          $publicName = '${{ inputs.lolgames_ssh_name }}'
+          if ([string]::IsNullOrWhiteSpace($publicName)) { $publicName = "windows-$env:GITHUB_RUN_ID-ssh" }
+          $publicPort = '${{ inputs.lolgames_ssh_port }}'
+          if ([string]::IsNullOrWhiteSpace($publicPort)) { $publicPort = [string](30000 + ([int64]$env:GITHUB_RUN_ID % 20000)) }
+          $tunnelPrefix = '${{ inputs.lolgames_tunnel_prefix }}'
+
+          $logPath = "$env:RUNNER_TEMP\lolgames-ssh\tunnel.log"
+          $args = @('-m','lolgames_tunnel','client','127.0.0.1:22','--server','agentsweb.space','--name',$publicName,'--public-port',$publicPort)
+          $env:PYTHONPATH = $env:GITHUB_WORKSPACE
+          $proc = Start-Process -FilePath python -ArgumentList $args -RedirectStandardOutput $logPath -RedirectStandardError "$env:RUNNER_TEMP\lolgames-ssh\tunnel.err" -PassThru
+          for ($i = 0; $i -lt 30; $i++) {
+            if ((Test-Path $logPath) -and ((Get-Content $logPath -Raw) -match 'agentsweb.space')) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not ((Get-Content $logPath -Raw) -match 'agentsweb.space')) { throw 'agentsweb tunnel did not start' }
+
+          $hostName = "$publicName.agentsweb.space"
+          $sshCmd = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p $publicPort runneradmin@$hostName"
+          $webUrl = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          @($sshCmd, $webUrl, "host=$hostName", "port=$publicPort", "lolgames_tunnel_prefix=$tunnelPrefix") | Out-File -FilePath "$env:RUNNER_TEMP\ssh-link.txt" -Encoding ascii
+          @("host=$hostName", "port=$publicPort", "lolgames_tunnel_prefix=$tunnelPrefix", "ssh_target=runneradmin@${hostName}:$publicPort", "sshd_ready=yes", "runner_name=$env:COMPUTERNAME", "runner_os=$(cmd /c ver)", "tunnel_pid=$($proc.Id)") | Out-File -FilePath "$env:RUNNER_TEMP\ssh-status.txt" -Encoding ascii
+          "ssh-cmd=$sshCmd" >> $env:GITHUB_OUTPUT
+          "host=$hostName" >> $env:GITHUB_OUTPUT
+          "port=$publicPort" >> $env:GITHUB_OUTPUT
+          "lolgames_tunnel_prefix=$tunnelPrefix" >> $env:GITHUB_OUTPUT
+
+          $lifetime = '${{ inputs.test_sleep_seconds }}'
+          if ([string]::IsNullOrWhiteSpace($lifetime)) { $lifetime = '18000' }
+          Write-Host "Keeping Windows worker alive for ${lifetime}s."
+          Start-Sleep -Seconds ([int]$lifetime)

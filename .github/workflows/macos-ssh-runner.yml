@@ -1,0 +1,154 @@
+name: 🍎 macOS SSH Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: OpenSSH public key authorized for runner access
+        required: true
+        type: string
+      lolgames_ssh_name:
+        description: Stable agentsweb SSH hostname prefix
+        required: false
+        type: string
+      lolgames_ssh_port:
+        description: Stable agentsweb SSH public port
+        required: false
+        type: string
+      lolgames_tunnel_prefix:
+        description: Stable Worker Agents agentsweb prefix
+        required: false
+        type: string
+      test_sleep_seconds:
+        description: Override keepalive sleep seconds. Default 18000 (5h).
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: macos-ssh-runner-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  ssh-session:
+    runs-on: macos-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install worker dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install tmux coreutils
+          echo "/opt/homebrew/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "/usr/local/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Start SSH over agentsweb
+        id: lolgames_ssh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh /tmp/lolgames-ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ inputs.ssh_public_key }}" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          sudo systemsetup -setremotelogin on
+          for _ in {1..30}; do
+            if nc -z 127.0.0.1 22; then
+              break
+            fi
+            sleep 1
+          done
+          nc -z 127.0.0.1 22
+
+          PUBLIC_NAME="${{ inputs.lolgames_ssh_name }}"
+          if [[ -z "$PUBLIC_NAME" ]]; then
+            PUBLIC_NAME="macos-${GITHUB_RUN_ID}-ssh"
+          fi
+
+          PUBLIC_PORT="${{ inputs.lolgames_ssh_port }}"
+          if [[ -z "$PUBLIC_PORT" ]]; then
+            PUBLIC_PORT="$((30000 + (GITHUB_RUN_ID % 20000)))"
+          fi
+
+          TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
+
+          nohup env LOLGAMES_TUNNEL_RUN_ID="$GITHUB_RUN_ID" PYTHONPATH="$GITHUB_WORKSPACE" python3 -m lolgames_tunnel client 127.0.0.1:22 \
+            --server agentsweb.space \
+            --name "$PUBLIC_NAME" \
+            --public-port "$PUBLIC_PORT" \
+            > /tmp/lolgames-ssh/tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+
+          for _ in {1..30}; do
+            if grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log
+
+          HOST="${PUBLIC_NAME}.agentsweb.space"
+          SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
+          WEB_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          {
+            echo "$SSH_CMD"
+            echo "$WEB_URL"
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+          } > /tmp/ssh-link.txt
+
+          {
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+            echo "ssh_target=runner@${HOST}:${PUBLIC_PORT}"
+            echo "sshd_ready=yes"
+            echo "runner_name=$(hostname)"
+            echo "runner_os=$(uname -a)"
+            echo "tunnel_pid=$TUNNEL_PID"
+            echo "tunnel_log_tail<<EOF"
+            tail -n 20 /tmp/lolgames-ssh/tunnel.log || true
+            echo "EOF"
+          } > /tmp/ssh-status.txt
+
+          echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
+          echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "SSH: $SSH_CMD"
+
+      - name: Upload SSH link as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-link
+          path: /tmp/ssh-link.txt
+          if-no-files-found: error
+
+      - name: Upload SSH status artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-status
+          path: /tmp/ssh-status.txt
+          if-no-files-found: error
+
+      - name: Keep macOS worker alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          lifetime="${{ inputs.test_sleep_seconds }}"
+          if [[ -z "$lifetime" ]]; then
+            lifetime=18000
+          fi
+          echo "Keeping macOS worker alive for ${lifetime}s."
+          sleep "$lifetime"

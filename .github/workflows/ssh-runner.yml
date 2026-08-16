@@ -8,15 +8,15 @@ on:
         required: true
         type: string
       lolgames_ssh_name:
-        description: Stable lolgames SSH hostname prefix
+        description: Stable agentsweb SSH hostname prefix
         required: false
         type: string
       lolgames_ssh_port:
-        description: Stable lolgames SSH public port
+        description: Stable agentsweb SSH public port
         required: false
         type: string
       lolgames_tunnel_prefix:
-        description: Stable Worker Agents lolgames prefix for refresh/provision flows
+        description: Stable Worker Agents agentsweb prefix for refresh/provision flows
         required: false
         type: string
       incus_stateful_vm_name:
@@ -56,7 +56,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Start SSH over lolgames
+      - name: Start SSH over agentsweb
         id: lolgames_ssh
         shell: bash
         run: |
@@ -93,22 +93,22 @@ jobs:
 
           TUNNEL_PREFIX="${{ inputs.lolgames_tunnel_prefix }}"
 
-          nohup python3 scripts/lolgames_tunnel.py client 127.0.0.1:2222 \
-            --server 161.153.109.33 \
+          nohup env LOLGAMES_TUNNEL_RUN_ID="$GITHUB_RUN_ID" PYTHONPATH="$GITHUB_WORKSPACE" python3 -m lolgames_tunnel client 127.0.0.1:2222 \
+            --server agentsweb.space \
             --name "$PUBLIC_NAME" \
             --public-port "$PUBLIC_PORT" \
             > /tmp/lolgames-ssh/tunnel.log 2>&1 &
           TUNNEL_PID=$!
 
           for _ in {1..30}; do
-            if grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log; then
+            if grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log; then
               break
             fi
             sleep 1
           done
-          grep -q "lolgames.net" /tmp/lolgames-ssh/tunnel.log
+          grep -q "agentsweb.space" /tmp/lolgames-ssh/tunnel.log
 
-          HOST="${PUBLIC_NAME}.lolgames.net"
+          HOST="${PUBLIC_NAME}.agentsweb.space"
           SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./id_ed25519 -p ${PUBLIC_PORT} runner@${HOST}"
           WEB_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
@@ -138,7 +138,7 @@ jobs:
           echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
           echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
           echo "============================================"
-          echo "  LOLGAMES SSH CONNECTION"
+          echo "  AGENTSWEB SSH CONNECTION"
           echo "============================================"
           echo "SSH: $SSH_CMD"
           echo "Host: $HOST"
@@ -301,7 +301,14 @@ jobs:
             sudo incus config set "$VM_NAME" migration.stateful true
             sudo incus config device override "$VM_NAME" root size.state=4GiB
             sudo incus start "$VM_NAME"
-            sleep 45
+            echo "Waiting for fresh Incus VM agent..."
+            for _ in $(seq 1 180); do
+              if sudo incus exec "$VM_NAME" -- true >/dev/null 2>&1; then
+                break
+              fi
+              sleep 2
+            done
+            sudo incus exec "$VM_NAME" -- true >/dev/null
           fi
 
           sudo incus info "$VM_NAME"
@@ -464,7 +471,7 @@ jobs:
               "ref": "${{ github.ref_name }}",
               "inputs": {
                   "ssh_public_key": """${{ inputs.ssh_public_key }}""".strip(),
-                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".lolgames.net"),
+                  "lolgames_ssh_name": """${{ steps.lolgames_ssh.outputs.host }}""".strip().removesuffix(".agentsweb.space"),
                   "lolgames_ssh_port": """${{ steps.lolgames_ssh.outputs.port }}""".strip(),
                   "lolgames_tunnel_prefix": """${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}""".strip(),
                   "incus_stateful_vm_name": """${{ inputs.incus_stateful_vm_name }}""".strip(),

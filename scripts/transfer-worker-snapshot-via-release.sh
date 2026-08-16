@@ -8,7 +8,7 @@ Usage:
   transfer-worker-snapshot-via-release.sh download <snapshot-id> <output-path>
 
 Environment:
-  REPO         GitHub repo to store the release assets in (default: alexcheng-dev/agent-workspace)
+  REPO         GitHub repo to store the release assets in (default: replypaldevs/agent-workspace)
   RELEASE_TAG  Release tag to use as the asset bucket (default: worker-snapshots)
   CHUNK_SIZE   split chunk size for upload (default: 1900m)
 
@@ -171,7 +171,7 @@ require gh
 require split
 require sha256sum
 
-REPO="${REPO:-alexcheng-dev/agent-workspace}"
+REPO="${REPO:-replypaldevs/agent-workspace}"
 RELEASE_TAG="${RELEASE_TAG:-worker-snapshots}"
 CHUNK_SIZE="${CHUNK_SIZE:-1900m}"
 
