@@ -46,8 +46,10 @@ async def client_once(args):
         host, port_text = target.rsplit(':', 1)
         target_port = int(port_text)
     else:
-        raise SystemExit('target must be host:port, e.g. localhost:3000')
+        raise SystemExit('target must be an SSH listener, e.g. 127.0.0.1:22 or 127.0.0.1:2222')
 
+    if target_port not in (22, 2222):
+        raise SystemExit('the Python broker is SSH/raw-TCP only; use FRP for HTTP services')
     public_port = args.public_port or target_port
     status_base = {
         'ok': False,
@@ -359,7 +361,7 @@ def add_client_args(parser):
     parser.add_argument('target')
     parser.add_argument('--server', default='agentsweb.space')
     parser.add_argument('--name')
-    parser.add_argument('--public-port', type=int)
+    parser.add_argument('--public-port', type=int, help='public SSH port; never an HTTP listener')
     parser.add_argument('--reconnect-delay', type=float, default=2.0, help='seconds to wait before reconnecting the control session after a broker reset')
     parser.add_argument('--keepalive-interval', type=float, default=10.0, help='seconds between control-session pings')
     parser.add_argument('--status-file', default=os.environ.get('LOLGAMES_TUNNEL_STATUS_FILE', '/tmp/lolgames-tunnel-status.json'), help='JSON status file written by the client')
