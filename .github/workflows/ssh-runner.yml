@@ -169,6 +169,11 @@ jobs:
             exit 0
           fi
           export DEBIAN_FRONTEND=noninteractive
+          # Hosted runners can emit an Azure mirrorlist whose archive host
+          # stalls for several minutes. Use the public Ubuntu archive for this
+          # bounded bootstrap step so Incus setup is deterministic.
+          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' {} +
           timeout 300 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
           timeout 600 sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
