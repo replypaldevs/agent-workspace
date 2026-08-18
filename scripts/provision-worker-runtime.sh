@@ -272,7 +272,16 @@ EOF
 else
   trace "start Worker Agents tmux"
   TMUX='' tmux -L workeragents -f /dev/null kill-server 2>/dev/null || true
-  TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents "cd \"$APP_HOME\" && PORT=${APP_PORT} AGENT_CONSOLE_HOST=127.0.0.1 HERMES_WEBUI_DIR=\"$HERMES_WEBUI_HOME\" FRP_TUNNEL_CLIENT_PATH=\"$FRP_TUNNEL_CLIENT_PATH\" FRP_TOKEN_FILE=\"$FRP_TOKEN_FILE\" FRP_AUTH_TOKEN=\"${FRP_AUTH_TOKEN:-}\" AGENT_TUNNEL_PREFIX=\"${TUNNEL_PREFIX}-worker-agents\"${AGENT_AUTO_START_ALL:+ AGENT_AUTO_START_ALL=\"$AGENT_AUTO_START_ALL\"} npm start > ~/worker-agents.log 2>&1"
+  # A stateful Incus restore can preserve a dead tmux socket after the server
+  # process is gone. Remove only this named socket before recreating it.
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workeragents"
+  for _ in 1 2 3; do
+    if TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents "cd \"$APP_HOME\" && PORT=${APP_PORT} AGENT_CONSOLE_HOST=127.0.0.1 HERMES_WEBUI_DIR=\"$HERMES_WEBUI_HOME\" FRP_TUNNEL_CLIENT_PATH=\"$FRP_TUNNEL_CLIENT_PATH\" FRP_TOKEN_FILE=\"$FRP_TOKEN_FILE\" FRP_AUTH_TOKEN=\"${FRP_AUTH_TOKEN:-}\" AGENT_TUNNEL_PREFIX=\"${TUNNEL_PREFIX}-worker-agents\"${AGENT_AUTO_START_ALL:+ AGENT_AUTO_START_ALL=\"$AGENT_AUTO_START_ALL\"} npm start > ~/worker-agents.log 2>&1"; then
+      break
+    fi
+    sleep 1
+  done
+  TMUX='' tmux -L workeragents -f /dev/null has-session -t workeragents
 fi
 trace "wait for Worker Agents API"
 for _ in $(seq 1 90); do
