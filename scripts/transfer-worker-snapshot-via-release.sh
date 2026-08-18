@@ -6,6 +6,7 @@ usage() {
 Usage:
   transfer-worker-snapshot-via-release.sh upload <snapshot-path> [snapshot-id]
   transfer-worker-snapshot-via-release.sh download <snapshot-id> <output-path>
+  transfer-worker-snapshot-via-release.sh latest <snapshot-prefix>
   transfer-worker-snapshot-via-release.sh prune <snapshot-prefix> [keep-count]
 
 Environment:
@@ -184,6 +185,12 @@ prune_snapshots() {
   )
 }
 
+latest_snapshot() {
+  local prefix="${1:?snapshot prefix required}"
+  gh api "repos/$REPO/releases/tags/$RELEASE_TAG" \
+    --jq "[.assets[]? | select(.name | startswith(\"${prefix}\") and endswith(\".manifest\")) | (.name | sub(\"\\\\.manifest$\"; \"\"))] | sort | last // \"\""
+}
+
 require gh
 require split
 require sha256sum
@@ -204,6 +211,10 @@ case "$cmd" in
   download)
     [[ $# -eq 2 ]] || { usage; exit 1; }
     download_snapshot "$@"
+    ;;
+  latest)
+    [[ $# -eq 1 ]] || { usage; exit 1; }
+    latest_snapshot "$1"
     ;;
   prune)
     [[ $# -ge 1 && $# -le 2 ]] || { usage; exit 1; }
