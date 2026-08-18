@@ -19,6 +19,7 @@ START_CHILD_AGENTS="${START_CHILD_AGENTS:-0}"
 PROVISION_TRACE="${PROVISION_TRACE:-1}"
 RUN_TOKEN="${RUN_TOKEN:-}"
 TUNNEL_PREFIX="${LOLGAMES_TUNNEL_PREFIX:-$(hostname | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' )-$(date +%s)}"
+WORKER_PUBLIC_URL="https://${TUNNEL_PREFIX}-worker-agents.agentsweb.space"
 
 trace() {
   [[ "$PROVISION_TRACE" == "1" ]] || return 0
@@ -264,6 +265,8 @@ set PATH=C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;C:\Progra
 if defined AGENT_AUTO_START_ALL set AGENT_AUTO_START_ALL=%AGENT_AUTO_START_ALL%
 set PORT=${APP_PORT}
 set AGENT_CONSOLE_HOST=127.0.0.1
+set AGENT_CONSOLE_PUBLIC_URL=${WORKER_PUBLIC_URL}
+set WORKER_AGENTS_URL=${WORKER_PUBLIC_URL}
 set HERMES_WEBUI_DIR=$(cygpath -w "$HERMES_WEBUI_HOME")
 cd /d ${APP_HOME_WIN}
 npm start > ${WORKER_LOG_WIN} 2> ${WORKER_ERR_LOG_WIN}
@@ -272,7 +275,7 @@ EOF
 else
   trace "start Worker Agents tmux"
   TMUX='' tmux -L workeragents -f /dev/null kill-server 2>/dev/null || true
-  TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents "cd \"$APP_HOME\" && PORT=${APP_PORT} AGENT_CONSOLE_HOST=127.0.0.1 HERMES_WEBUI_DIR=\"$HERMES_WEBUI_HOME\" FRP_TUNNEL_CLIENT_PATH=\"$FRP_TUNNEL_CLIENT_PATH\" FRP_TOKEN_FILE=\"$FRP_TOKEN_FILE\" FRP_AUTH_TOKEN=\"${FRP_AUTH_TOKEN:-}\" AGENT_TUNNEL_PREFIX=\"${TUNNEL_PREFIX}-worker-agents\"${AGENT_AUTO_START_ALL:+ AGENT_AUTO_START_ALL=\"$AGENT_AUTO_START_ALL\"} npm start > ~/worker-agents.log 2>&1"
+  TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents "cd \"$APP_HOME\" && PORT=${APP_PORT} AGENT_CONSOLE_HOST=127.0.0.1 AGENT_CONSOLE_PUBLIC_URL=\"$WORKER_PUBLIC_URL\" WORKER_AGENTS_URL=\"$WORKER_PUBLIC_URL\" HERMES_WEBUI_DIR=\"$HERMES_WEBUI_HOME\" FRP_TUNNEL_CLIENT_PATH=\"$FRP_TUNNEL_CLIENT_PATH\" FRP_TOKEN_FILE=\"$FRP_TOKEN_FILE\" FRP_AUTH_TOKEN=\"${FRP_AUTH_TOKEN:-}\" AGENT_TUNNEL_PREFIX=\"${TUNNEL_PREFIX}-worker-agents\"${AGENT_AUTO_START_ALL:+ AGENT_AUTO_START_ALL=\"$AGENT_AUTO_START_ALL\"} npm start > ~/worker-agents.log 2>&1"
 fi
 trace "wait for Worker Agents readiness"
 for _ in $(seq 1 90); do
