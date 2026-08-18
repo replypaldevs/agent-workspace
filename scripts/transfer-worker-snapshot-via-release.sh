@@ -6,6 +6,7 @@ usage() {
 Usage:
   transfer-worker-snapshot-via-release.sh upload <snapshot-path> [snapshot-id]
   transfer-worker-snapshot-via-release.sh download <snapshot-id> <output-path>
+  transfer-worker-snapshot-via-release.sh prune <snapshot-prefix> [keep-count]
 
 Environment:
   REPO         GitHub repo to store the release assets in (default: replypaldevs/agent-workspace)
@@ -167,6 +168,22 @@ download_snapshot() {
   rm -rf "$tmp_dir"
 }
 
+prune_snapshots() {
+  local prefix="${1:?snapshot prefix required}"
+  local keep="${2:-3}"
+  local snapshot_id
+  [[ "$keep" =~ ^[1-9][0-9]*$ ]] || { echo "keep-count must be a positive integer" >&2; exit 2; }
+
+  while IFS= read -r snapshot_id; do
+    [[ -n "$snapshot_id" ]] || continue
+    printf 'pruning completed snapshot generation: %s\n' "$snapshot_id" >&2
+    delete_matching_assets "$snapshot_id"
+  done < <(
+    gh api "repos/$REPO/releases/tags/$RELEASE_TAG" \
+      --jq "[.assets[]? | select(.name | startswith(\"${prefix}\") and endswith(\".manifest\")) | {id:(.name | sub(\"\\\\.manifest$\"; \"\")), created_at}] | sort_by(.created_at) | reverse | .[$keep:] | .[].id"
+  )
+}
+
 require gh
 require split
 require sha256sum
@@ -187,6 +204,10 @@ case "$cmd" in
   download)
     [[ $# -eq 2 ]] || { usage; exit 1; }
     download_snapshot "$@"
+    ;;
+  prune)
+    [[ $# -ge 1 && $# -le 2 ]] || { usage; exit 1; }
+    prune_snapshots "$@"
     ;;
   *)
     usage

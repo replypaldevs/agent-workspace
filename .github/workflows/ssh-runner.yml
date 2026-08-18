@@ -427,6 +427,16 @@ jobs:
           path: /tmp/incus-worker-agents.txt
           if-no-files-found: ignore
 
+      - name: Prune old restored snapshot generations
+        if: ${{ steps.incus_worker_agents.outputs.worker_agents_url != '' && inputs.incus_stateful_snapshot_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY" RELEASE_TAG="${{ inputs.incus_stateful_release_tag || 'worker-snapshots' }}" \
+            scripts/transfer-worker-snapshot-via-release.sh prune "${{ inputs.incus_stateful_vm_name }}-" 3
+
       - name: Upload SSH link as artifact
         uses: actions/upload-artifact@v4
         with:
