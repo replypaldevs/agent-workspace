@@ -165,8 +165,7 @@ jobs:
           fi
           export DEBIAN_FRONTEND=noninteractive
           timeout 300 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
-          timeout 600 sudo apt-get install -y --no-install-recommends \
-            incus qemu-system-x86 qemu-utils dnsmasq-base ovmf swtpm
+          timeout 600 sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
       - name: Restore Incus VM from release snapshot
         id: incus_restore
