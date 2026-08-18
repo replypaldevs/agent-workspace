@@ -246,6 +246,12 @@ jobs:
             sleep 2
           done
           sudo incus exec "$VM_NAME" -- true >/dev/null
+          # Stateful QEMU restores can resume the guest RTC behind the host
+          # wall clock. Reconcile it before apt or any time-sensitive TLS/API
+          # operation; otherwise Release files may appear to be from the
+          # future and package recovery fails immediately.
+          HOST_NOW="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          sudo incus exec "$VM_NAME" -- date -u -s "$HOST_NOW"
           sudo incus file push scripts/fix-restored-incus-network.sh "$VM_NAME/root/fix-restored-incus-network.sh"
           sudo incus exec "$VM_NAME" -- bash /root/fix-restored-incus-network.sh
 
@@ -336,6 +342,8 @@ jobs:
               sleep 2
             done
             sudo incus exec "$VM_NAME" -- true >/dev/null
+            HOST_NOW="$(date -u '+%Y-%m-%d %H:%M:%S')"
+            sudo incus exec "$VM_NAME" -- date -u -s "$HOST_NOW"
           fi
 
           sudo incus info "$VM_NAME"
