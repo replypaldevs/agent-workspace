@@ -134,7 +134,7 @@ write_state_and_emit() {
   trace "capture status + start tunnels"
   curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" > "$status_path"
   local worker_agents_url=""
-  worker_agents_url="$(start_tunnel worker-agents "$APP_PORT" '/api/status' || true)"
+  worker_agents_url="$(start_tunnel worker-agents "$APP_PORT" '/api/ready' || true)"
 
   python3 - "$status_path" "$worker_agents_url" "$APP_PORT" "$(hostname)" "$(read_boot_marker)" <<'PY'
 import json, os, sys
@@ -239,8 +239,8 @@ trace "configure worker shell env"
 configure_shell_env
 sync_worker_app
 cd "$APP_HOME"
-trace "npm install workerAgents"
-npm install
+trace "install locked Worker Agents runtime"
+npm ci
 if [[ "$INSTALL_CHILD_DEPS" == "1" ]]; then
   trace "clone Hermes WebUI"
   rm -rf "$HERMES_WEBUI_HOME"
@@ -274,9 +274,9 @@ else
   TMUX='' tmux -L workeragents -f /dev/null kill-server 2>/dev/null || true
   TMUX='' tmux -L workeragents -f /dev/null new-session -d -s workeragents "cd \"$APP_HOME\" && PORT=${APP_PORT} AGENT_CONSOLE_HOST=127.0.0.1 HERMES_WEBUI_DIR=\"$HERMES_WEBUI_HOME\" FRP_TUNNEL_CLIENT_PATH=\"$FRP_TUNNEL_CLIENT_PATH\" FRP_TOKEN_FILE=\"$FRP_TOKEN_FILE\" FRP_AUTH_TOKEN=\"${FRP_AUTH_TOKEN:-}\" AGENT_TUNNEL_PREFIX=\"${TUNNEL_PREFIX}-worker-agents\"${AGENT_AUTO_START_ALL:+ AGENT_AUTO_START_ALL=\"$AGENT_AUTO_START_ALL\"} npm start > ~/worker-agents.log 2>&1"
 fi
-trace "wait for Worker Agents API"
+trace "wait for Worker Agents readiness"
 for _ in $(seq 1 90); do
-  if curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${APP_PORT}/api/ready" >/dev/null 2>&1; then
     break
   fi
   sleep 2
