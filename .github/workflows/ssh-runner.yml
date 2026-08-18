@@ -396,11 +396,13 @@ jobs:
           sudo incus exec "$VM_NAME" -- bash -lc '
             set -euo pipefail
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update
-            apt-get install -y ca-certificates curl git python3 tmux tar
+            find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+              -exec sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' {} +
+            timeout 300 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+            timeout 600 apt-get install -y ca-certificates curl git python3 tmux tar
             if ! command -v node >/dev/null 2>&1 || [[ "$(node -p "process.versions.node.split(\".\")[0]")" -lt 22 ]]; then
               curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-              apt-get install -y nodejs
+              timeout 600 apt-get install -y nodejs
             fi
           '
           sudo incus file push scripts/provision-worker-runtime.sh "$VM_NAME/root/provision-worker-runtime.sh"
