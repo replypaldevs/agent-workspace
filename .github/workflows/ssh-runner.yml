@@ -363,7 +363,11 @@ jobs:
 
           # A stateful restore resumes Worker Agents and frpc. Give that fast path
           # a bounded opportunity to reconnect before doing a source refresh.
-          if sudo incus exec "$VM_NAME" -- curl -fsS --max-time 5 http://127.0.0.1:1456/api/status >/dev/null 2>&1; then
+          # Do not preserve a stale application checkout across generations.
+          CURRENT_REV="$(sudo incus exec "$VM_NAME" -- git -C /root/workerAgents rev-parse HEAD 2>/dev/null || true)"
+          PUBLIC_REV="$(git ls-remote https://github.com/replypaldevs/workerAgents.git refs/heads/main | awk '{print $1}')"
+          if [[ -n "$CURRENT_REV" && "$CURRENT_REV" == "$PUBLIC_REV" ]] && \
+             sudo incus exec "$VM_NAME" -- curl -fsS --max-time 5 http://127.0.0.1:1456/api/status >/dev/null 2>&1; then
             for _ in $(seq 1 18); do
               if curl -fsS --max-time 5 "$PUBLIC_URL/api/status" >/dev/null 2>&1; then
                 echo "Restored Worker Agents and FRP tunnel resumed without reinstall."
@@ -376,6 +380,7 @@ jobs:
               sleep 5
             done
           fi
+          echo "Refreshing Worker Agents revision ${CURRENT_REV:-missing} to ${PUBLIC_REV:-unknown}."
 
           sudo incus exec "$VM_NAME" -- bash -lc '
             set -euo pipefail
