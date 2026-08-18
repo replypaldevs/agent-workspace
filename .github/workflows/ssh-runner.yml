@@ -35,6 +35,16 @@ on:
         description: Optional base64-encoded shell script to run inside a freshly created VM on the first run
         required: false
         type: string
+      incus_worker_agents:
+        description: Provision and verify canonical FRP Worker Agents inside the Incus VM
+        required: false
+        default: false
+        type: boolean
+      worker_agents_git_ref:
+        description: Worker Agents branch or commit to provision inside Incus
+        required: false
+        default: main
+        type: string
       test_sleep_seconds:
         description: Override keepalive sleep (seconds). Default 3600 (1h). For testing use 600 (10min) or 120 (2min).
         required: false
@@ -51,7 +61,7 @@ concurrency:
 jobs:
   ssh-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 350
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -62,8 +72,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y openssh-server tmux
+          if ! command -v /usr/sbin/sshd >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+            timeout 180 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+            timeout 180 sudo apt-get install -y openssh-server tmux
+          fi
 
           mkdir -p ~/.ssh /tmp/lolgames-ssh
           chmod 700 ~/.ssh
@@ -133,10 +145,12 @@ jobs:
             echo "EOF"
           } > /tmp/ssh-status.txt
 
-          echo "ssh-cmd=$SSH_CMD" >> "$GITHUB_OUTPUT"
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-          echo "port=$PUBLIC_PORT" >> "$GITHUB_OUTPUT"
-          echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX" >> "$GITHUB_OUTPUT"
+          {
+            echo "ssh-cmd=$SSH_CMD"
+            echo "host=$HOST"
+            echo "port=$PUBLIC_PORT"
+            echo "lolgames_tunnel_prefix=$TUNNEL_PREFIX"
+          } >> "$GITHUB_OUTPUT"
           echo "============================================"
           echo "  AGENTSWEB SSH CONNECTION"
           echo "============================================"
@@ -144,6 +158,24 @@ jobs:
           echo "Host: $HOST"
           echo "Port: $PUBLIC_PORT"
           echo "============================================"
+
+      - name: Install Incus host dependencies
+        if: ${{ inputs.incus_stateful_vm_name != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v incus >/dev/null 2>&1 && command -v qemu-system-x86_64 >/dev/null 2>&1; then
+            echo "Incus host dependencies already available."
+            exit 0
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          # Hosted runners can emit an Azure mirrorlist whose archive host
+          # stalls for several minutes. Use the public Ubuntu archive for this
+          # bounded bootstrap step so Incus setup is deterministic.
+          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' {} +
+          timeout 300 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+          timeout 600 sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
       - name: Restore Incus VM from release snapshot
         id: incus_restore
@@ -154,8 +186,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
           sudo usermod -aG incus,incus-admin "$USER" || true
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
@@ -254,9 +284,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
-
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
           fi
@@ -297,7 +324,7 @@ jobs:
           else
             INCUS_BOOTSTRAP_SCRIPT_B64='${{ inputs.incus_bootstrap_script_b64 }}' python3 scripts/write-incus-cloud-init.py
             sudo incus init images:ubuntu/noble/cloud "$VM_NAME" --vm -c limits.memory=2048MiB -c limits.cpu=2
-            sudo incus config set "$VM_NAME" user.user-data - </tmp/incus-cloud-init.yaml
+            cat /tmp/incus-cloud-init.yaml | sudo incus config set "$VM_NAME" user.user-data -
             sudo incus config set "$VM_NAME" migration.stateful true
             sudo incus config device override "$VM_NAME" root size.state=4GiB
             sudo incus start "$VM_NAME"
@@ -330,6 +357,99 @@ jobs:
           path: /tmp/incus-bootstrap.txt
           if-no-files-found: error
 
+      - name: Provision or recover Worker Agents inside Incus
+        id: incus_worker_agents
+        if: ${{ inputs.incus_worker_agents && inputs.incus_stateful_vm_name != '' }}
+        env:
+          FRP_AUTH_TOKEN: ${{ secrets.FRP_AUTH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${FRP_AUTH_TOKEN:?FRP_AUTH_TOKEN is required for Incus Worker Agents}"
+          VM_NAME="${{ inputs.incus_stateful_vm_name }}"
+          TUNNEL_PREFIX="${{ steps.lolgames_ssh.outputs.lolgames_tunnel_prefix }}"
+          PUBLIC_URL="https://${TUNNEL_PREFIX}-worker-agents.agentsweb.space"
+
+          # A stateful restore resumes Worker Agents and frpc. Give that fast path
+          # a bounded opportunity to reconnect before doing a source refresh.
+          # Do not preserve a stale application checkout across generations.
+          CURRENT_REV="$(sudo incus exec "$VM_NAME" -- git -C /root/workerAgents rev-parse HEAD 2>/dev/null || true)"
+          WORKER_REF="${{ inputs.worker_agents_git_ref }}"
+          PUBLIC_REV="$(git ls-remote https://github.com/replypaldevs/workerAgents.git "refs/heads/$WORKER_REF" | awk '{print $1}')"
+          if [[ -n "$CURRENT_REV" && "$CURRENT_REV" == "$PUBLIC_REV" ]] && \
+             sudo incus exec "$VM_NAME" -- curl -fsS --max-time 5 http://127.0.0.1:1456/api/status >/dev/null 2>&1; then
+            for _ in $(seq 1 18); do
+              if curl -fsS --max-time 5 "$PUBLIC_URL/api/status" >/dev/null 2>&1; then
+                echo "Restored Worker Agents and FRP tunnel resumed without reinstall."
+                echo "worker_agents_url=$PUBLIC_URL" >> "$GITHUB_OUTPUT"
+                echo "provision_mode=stateful-resume" >> "$GITHUB_OUTPUT"
+                printf 'worker_agents_url=%s\nprovision_mode=stateful-resume\nverified_at=%s\n' \
+                  "$PUBLIC_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/tmp/incus-worker-agents.txt
+                exit 0
+              fi
+              sleep 5
+            done
+          fi
+          echo "Refreshing Worker Agents revision ${CURRENT_REV:-missing} to ${PUBLIC_REV:-unknown}."
+
+          sudo incus exec "$VM_NAME" -- bash -lc '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+              -exec sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' {} +
+            timeout 300 apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+            timeout 600 apt-get install -y ca-certificates curl git python3 tmux tar
+            if ! command -v node >/dev/null 2>&1 || [[ "$(node -p "process.versions.node.split(\".\")[0]")" -lt 22 ]]; then
+              curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+              timeout 600 apt-get install -y nodejs
+            fi
+          '
+          sudo incus file push scripts/provision-worker-runtime.sh "$VM_NAME/root/provision-worker-runtime.sh"
+          sudo incus file push scripts/frp-tunnel.sh "$VM_NAME/root/frp-tunnel.sh"
+          printf '%s' "$FRP_AUTH_TOKEN" >/tmp/incus-frp-token
+          chmod 600 /tmp/incus-frp-token
+          sudo incus exec "$VM_NAME" -- mkdir -p /root/.config/frp
+          sudo incus file push /tmp/incus-frp-token "$VM_NAME/root/.config/frp/token"
+          sudo incus exec "$VM_NAME" -- chmod 700 /root/provision-worker-runtime.sh /root/frp-tunnel.sh
+          sudo incus exec "$VM_NAME" -- env \
+            APP_PORT=1456 \
+            RUN_TOKEN="incus-${GITHUB_RUN_ID}" \
+            WORKER_AGENTS_GIT_URL=https://github.com/replypaldevs/workerAgents.git \
+            WORKER_AGENTS_GIT_REF="${{ inputs.worker_agents_git_ref }}" \
+            FRP_TUNNEL_CLIENT_PATH=/root/frp-tunnel.sh \
+            FRP_TOKEN_FILE=/root/.config/frp/token \
+            LOLGAMES_TUNNEL_PREFIX="$TUNNEL_PREFIX" \
+            START_CHILD_AGENTS=0 \
+            INSTALL_CHILD_DEPS=0 \
+            PROVISION_TRACE=1 \
+            bash /root/provision-worker-runtime.sh | tee /tmp/incus-worker-agents-provision.log
+
+          sudo incus exec "$VM_NAME" -- curl -fsS --max-time 10 http://127.0.0.1:1456/api/status >/dev/null
+          curl -fsS --retry 12 --retry-delay 5 --max-time 10 "$PUBLIC_URL/api/status" >/dev/null
+          echo "worker_agents_url=$PUBLIC_URL" >> "$GITHUB_OUTPUT"
+          echo "provision_mode=provisioned" >> "$GITHUB_OUTPUT"
+          printf 'worker_agents_url=%s\nprovision_mode=provisioned\nverified_at=%s\n' \
+            "$PUBLIC_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/tmp/incus-worker-agents.txt
+
+      - name: Upload Incus Worker Agents readiness artifact
+        if: ${{ steps.incus_worker_agents.outputs.worker_agents_url != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: incus-worker-agents
+          path: /tmp/incus-worker-agents.txt
+          if-no-files-found: ignore
+
+      - name: Prune old restored snapshot generations
+        if: ${{ steps.incus_worker_agents.outputs.worker_agents_url != '' && inputs.incus_stateful_snapshot_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY" RELEASE_TAG="${{ inputs.incus_stateful_release_tag || 'worker-snapshots' }}" \
+            scripts/transfer-worker-snapshot-via-release.sh prune "${{ inputs.incus_stateful_vm_name }}-" 3
+
       - name: Upload SSH link as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -361,9 +481,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
@@ -403,33 +520,21 @@ jobs:
           if [[ -z "$RELEASE_TAG" ]]; then
             RELEASE_TAG="worker-snapshots"
           fi
-          SNAPSHOT_ID="${{ inputs.incus_stateful_snapshot_id }}"
-          if [[ -z "$SNAPSHOT_ID" ]]; then
-            SNAPSHOT_ID="${VM_NAME}-stateful-${GITHUB_RUN_ID}"
-          fi
+          # Never overwrite the last known-good generation. A unique immutable
+          # snapshot lets a watchdog or operator recover after a failed upload.
+          SNAPSHOT_ID="${VM_NAME}-stateful-${GITHUB_RUN_ID}"
           SNAPSHOT_PATH="/tmp/${SNAPSHOT_ID}.tar.gz"
 
           if ! sudo incus info "$VM_NAME" >/dev/null 2>&1; then
-            echo "VM $VM_NAME not present on this runner; skipping stateful export."
-            {
-              echo "snapshot_vm_name="
-              echo "snapshot_id="
-              echo "snapshot_release_tag="
-            } >> "$GITHUB_OUTPUT"
-            {
-              echo "snapshot_vm_name=$VM_NAME"
-              echo "snapshot_skipped=missing-vm"
-              echo "snapshot_release_tag=$RELEASE_TAG"
-              echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            } > /tmp/incus-export.txt
-            exit 0
+            echo "VM $VM_NAME is missing; refusing to reset a stateful chain." >&2
+            exit 1
           fi
 
           sudo incus stop "$VM_NAME" --stateful
           sudo rm -f "$SNAPSHOT_PATH"
           sudo touch "$SNAPSHOT_PATH"
           sudo chmod 666 "$SNAPSHOT_PATH"
-          timeout "${INCUS_EXPORT_TIMEOUT_SECONDS:-300}" sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
+          timeout "${INCUS_EXPORT_TIMEOUT_SECONDS:-900}" sudo incus export "$VM_NAME" "$SNAPSHOT_PATH"
           [[ -s "$SNAPSHOT_PATH" ]] || { echo "Incus export produced an empty snapshot: $SNAPSHOT_PATH" >&2; exit 1; }
           sudo chown "$USER:$USER" "$SNAPSHOT_PATH"
 
@@ -459,6 +564,7 @@ jobs:
           if-no-files-found: error
 
       - name: Dispatch successor run
+        if: ${{ inputs.incus_stateful_vm_name == '' || steps.incus_export.outputs.snapshot_id != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -478,6 +584,8 @@ jobs:
                   "incus_stateful_snapshot_id": """${{ steps.incus_export.outputs.snapshot_id }}""".strip(),
                   "incus_stateful_release_tag": """${{ steps.incus_export.outputs.snapshot_release_tag || inputs.incus_stateful_release_tag }}""".strip(),
                   "incus_bootstrap_script_b64": """${{ inputs.incus_bootstrap_script_b64 }}""".strip(),
+                  "incus_worker_agents": """${{ inputs.incus_worker_agents }}""".strip(),
+                  "worker_agents_git_ref": """${{ inputs.worker_agents_git_ref }}""".strip(),
                   "test_sleep_seconds": """${{ inputs.test_sleep_seconds }}""".strip(),
               },
           }
