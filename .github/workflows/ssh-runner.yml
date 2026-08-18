@@ -67,8 +67,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y openssh-server tmux
+          if ! command -v /usr/sbin/sshd >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+            timeout 180 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+            timeout 180 sudo apt-get install -y openssh-server tmux
+          fi
 
           mkdir -p ~/.ssh /tmp/lolgames-ssh
           chmod 700 ~/.ssh
@@ -152,6 +154,19 @@ jobs:
           echo "Port: $PUBLIC_PORT"
           echo "============================================"
 
+      - name: Install Incus host dependencies
+        if: ${{ inputs.incus_stateful_vm_name != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v incus >/dev/null 2>&1 && command -v qemu-system-x86_64 >/dev/null 2>&1; then
+            echo "Incus host dependencies already available."
+            exit 0
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 300 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+          timeout 600 sudo apt-get install -y --no-install-recommends incus qemu-system-x86 qemu-utils
+
       - name: Restore Incus VM from release snapshot
         id: incus_restore
         if: ${{ inputs.incus_stateful_snapshot_id != '' }}
@@ -161,8 +176,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
           sudo usermod -aG incus,incus-admin "$USER" || true
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
@@ -260,9 +273,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
@@ -443,9 +453,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y incus qemu-system-x86 qemu-utils
 
           if ! sudo test -S /var/lib/incus/unix.socket; then
             sudo incus admin init --auto
