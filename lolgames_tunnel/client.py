@@ -5,7 +5,6 @@ import os
 import sys
 
 from .common import CONTROL_PORT, b64, now_iso, raise_buffer_limits, recv, send, ub64, write_status
-from .status_server import run_status_server
 
 CONN_QUEUE_MAX = int(os.environ.get('LOLGAMES_TUNNEL_CONN_QUEUE', '64') or '64')
 OUT_QUEUE_MAX = int(os.environ.get('LOLGAMES_TUNNEL_OUT_QUEUE', '128') or '128')
@@ -323,38 +322,30 @@ async def client(args):
     if not args.history_file:
         args.history_file = default_history_file(args.status_file)
     args._reconnects = 0
-    status_task = None
-    if args.status_http:
-        status_task = asyncio.create_task(run_status_server(args.status_http, args.status_file))
-    try:
-        while True:
-            try:
-                await client_once(args)
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                raise
-            except Exception as exc:
-                status = {
-                    'ok': False,
-                    'state': 'error',
-                    'server': args.server,
-                    'control_port': CONTROL_PORT,
-                    'target': args.target,
-                    'subdomain': args.name or '',
-                    'pid': os.getpid(),
-                    'reconnects': args._reconnects,
-                    'dropped_connections': int(getattr(args, '_dropped_connections', 0)),
-                    'last_error': str(exc),
-                    'history_file': args.history_file,
-                }
-                add_event(args, status, 'error', f'control connection lost: {exc}', level='error', error=str(exc))
-                write_status(args.status_file, status)
-                print(f'control connection lost: {exc}; reconnecting in {args.reconnect_delay}s', file=sys.stderr, flush=True)
-            args._reconnects += 1
-            await asyncio.sleep(args.reconnect_delay)
-    finally:
-        if status_task:
-            status_task.cancel()
-            await asyncio.gather(status_task, return_exceptions=True)
+    while True:
+        try:
+            await client_once(args)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            status = {
+                'ok': False,
+                'state': 'error',
+                'server': args.server,
+                'control_port': CONTROL_PORT,
+                'target': args.target,
+                'subdomain': args.name or '',
+                'pid': os.getpid(),
+                'reconnects': args._reconnects,
+                'dropped_connections': int(getattr(args, '_dropped_connections', 0)),
+                'last_error': str(exc),
+                'history_file': args.history_file,
+            }
+            add_event(args, status, 'error', f'control connection lost: {exc}', level='error', error=str(exc))
+            write_status(args.status_file, status)
+            print(f'control connection lost: {exc}; reconnecting in {args.reconnect_delay}s', file=sys.stderr, flush=True)
+        args._reconnects += 1
+        await asyncio.sleep(args.reconnect_delay)
 
 
 def add_client_args(parser):
@@ -366,7 +357,6 @@ def add_client_args(parser):
     parser.add_argument('--keepalive-interval', type=float, default=10.0, help='seconds between control-session pings')
     parser.add_argument('--status-file', default=os.environ.get('LOLGAMES_TUNNEL_STATUS_FILE', '/tmp/lolgames-tunnel-status.json'), help='JSON status file written by the client')
     parser.add_argument('--history-file', default=os.environ.get('LOLGAMES_TUNNEL_HISTORY_FILE', ''), help='JSONL history file written by the client')
-    parser.add_argument('--status-http', default=os.environ.get('LOLGAMES_TUNNEL_STATUS_HTTP', ''), help='optional status UI bind address, e.g. 127.0.0.1:1457')
     return parser
 
 
